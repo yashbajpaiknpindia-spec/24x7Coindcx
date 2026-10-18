@@ -522,7 +522,7 @@ def mark_paper_positions(db: Session):
                        'adverse_move_pct': adverse_move_pct, 'stop_loss_move_pct': stop_pct})
             closed += 1
     db.commit()
-    return {'marked': len(positions), 'protective_exits': closed}
+    return {'marked': len(all_positions), 'protective_exits': closed}
 
 
 def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: dict, reason='signal rebalance exit'):
@@ -555,6 +555,7 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
 
 def run_paper_cycle(db: Session, force: bool = False):
     cfg=read_config(db,'strategy_config',{})
+    cfg.setdefault('capital_allocation_pct_per_position',10.0)
     if not cfg.get('paper_enabled') and not force:
         return {'ok':False,'message':'Paper engine is paused. Enable paper trading first.'}
     scores=calculate_scores(db,cfg)
