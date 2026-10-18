@@ -293,6 +293,7 @@ def refresh_markets(db: Session):
             last_price=snap.last_price, bid=snap.bid, ask=snap.ask,
             turnover_usdt=snap.quote_turnover_usdt, active=snap.active,
             source_updated_at=snap.updated_at))
+    db.flush()
     # Retain up to 30 days, with an independent hard row cap to protect DB storage.
     db.execute(delete(MarketObservation).where(MarketObservation.observed_at < now - timedelta(days=30)))
     observation_count = db.scalar(select(func.count(MarketObservation.id))) or 0
