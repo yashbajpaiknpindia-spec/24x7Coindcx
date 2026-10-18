@@ -321,7 +321,7 @@ def api_paper_status(request: Request):
 def api_paper_rejection_audit(request: Request):
     if not authed(request): return JSONResponse({'error':'login_required'}, status_code=401)
     with SessionLocal() as db:
-        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000)).all()
+        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(100)).all()
         payload=[]
         for a in audits:
             payload.append({'id':a.id,'at':a.decision_at.isoformat() if a.decision_at else None,'mode':a.mode,
@@ -330,7 +330,16 @@ def api_paper_rejection_audit(request: Request):
                 'outcome_1h_pct':a.outcome_1h_pct,'net_outcome_1h_pct':a.net_outcome_1h_pct,'evaluated_1h':a.evaluated_1h,
                 'outcome_4h_pct':a.outcome_4h_pct,'net_outcome_4h_pct':a.net_outcome_4h_pct,'evaluated_4h':a.evaluated_4h,
                 'outcome_24h_pct':a.outcome_24h_pct,'net_outcome_24h_pct':a.net_outcome_24h_pct,'evaluated_24h':a.evaluated_24h})
-        return {'count':len(payload),'retention_days':90,'decisions':payload}
+        summary={}
+        for mode in ('unrestricted','capital_constrained'):
+            base=select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.mode==mode,PaperDecisionAudit.decision=='rejected')
+            summary[mode+'_rejected']=db.scalar(base) or 0
+        summary['rejected_would_win_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
+            PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct>0)) or 0
+        summary['rejected_correct_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
+            PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct<=0)) or 0
+        summary['total_decisions']=db.scalar(select(func.count(PaperDecisionAudit.id))) or 0
+        return {'count':len(payload),'total_decisions':summary['total_decisions'],'summary':summary,'retention_days':90,'decisions':payload}
 
 @app.get('/api/system-health')
 def api_system_health(request: Request):
