@@ -10,7 +10,7 @@ PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USD
 STRATEGY_ID = 'CSM14D_VOL14D_LIQ7D_DAILY'
 STRATEGY_NAME = '14D Cross-Sectional Momentum / Volatility Rank'
 STRATEGY_VERSION = '1.0.0-research-reproduction'
-PAPER_ENGINE_VERSION = '1.4.5-stablecoin-filter'
+PAPER_ENGINE_VERSION = '1.5.0-risk-exits-cost-gates'
 # Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
 # ranks, which can manufacture large scores from tiny price noise. Keep them visible
 # in the market scanner, but don't allow them into trend strategy candidates.
@@ -64,7 +64,7 @@ def initialize_defaults(db: Session):
             'futures_fee_pct': env_float('FUTURES_TAKER_FEE_PCT', 0.075), 'normal_slippage_pct': env_float('NORMAL_SLIPPAGE_PCT', 0.05),
             'stress_slippage_pct': env_float('STRESS_SLIPPAGE_PCT', 0.12), 'funding_stress_pct_per_8h': 0.01,
             'min_quote_turnover_usdt': env_float('MIN_QUOTE_TURNOVER_USDT', 250000), 'max_spread_bps': env_float('MAX_SPREAD_BPS', 50),
-            'max_stale_seconds': 120, 'auto_live_armed': False, 'paper_last_cycle': None, 'last_error': None,
+            'max_stale_seconds': 120, 'stop_loss_move_pct': 0.75, 'persistent_loss_move_pct': 0.35, 'persistent_loss_observations': 3, 'min_expected_move_pct': 0.75, 'cost_coverage_multiple': 1.5, 'auto_live_armed': False, 'paper_last_cycle': None, 'last_error': None,
         },
         'live_state': {'armed': False, 'armed_at': None, 'typed_confirmation': False, 'auto_live_armed': False},
         'runtime': {'worker_last_heartbeat': None, 'last_market_refresh': None, 'market_refresh_error': None, 'last_strategy_cycle': None, 'worker_started': None},
@@ -304,6 +304,15 @@ def market_eligibility(snap: MarketSnapshot, config: dict):
     if spread is None: return False, 'best bid/ask unavailable; spread cannot be verified'
     return True, 'passes configured liquidity/spread checks'
 
+def _entry_cost_hurdle_pct(product: str, config: dict, snap: MarketSnapshot):
+    fee = float(config.get('spot_fee_pct' if product == 'spot' else 'futures_fee_pct', 0.15 if product == 'spot' else 0.075))
+    slip = float(config.get('normal_slippage_pct', 0.05)) if config.get('paper_cost_case', 'NORMAL') == 'NORMAL' else float(config.get('stress_slippage_pct', 0.12))
+    spread_bps = market_spread_bps(snap.bid, snap.ask)
+    if spread_bps is None:
+        return None
+    # Percent values are configured in percentage points; bid/ask spread is bps.
+    return 2.0 * (fee + slip) + spread_bps / 100.0
+
 def normalize_candles(rows):
     out=[]
     for row in rows or []:
@@ -359,6 +368,8 @@ def calculate_scores(db: Session, config: dict):
         if len(closes) < 14*24+2: continue
         candle_ready += 1; usable_pairs[product] += 1
         momentum = closes[-1] / closes[-(14*24+1)] - 1.0
+        momentum_24h = closes[-1] / closes[-25] - 1.0
+        momentum_72h = closes[-1] / closes[-73] - 1.0
         returns=[]
         for i in range(max(1,len(closes)-14*24),len(closes)):
             if closes[i-1] > 0: returns.append(closes[i]/closes[i-1]-1)
@@ -368,6 +379,8 @@ def calculate_scores(db: Session, config: dict):
         exclusion_reason = strategy_pair_exclusion_reason(pair)
         score_results.setdefault(product,[]).append({
             'pair':pair,'score':score,'momentum_pct':momentum*100,
+            'momentum_24h_pct':momentum_24h*100,'momentum_72h_pct':momentum_72h*100,
+            'expected_move_pct':max(abs(momentum_24h)*0.75, vol*math.sqrt(24)*0.75)*100,
             'hourly_volatility_pct':vol*100,'turnover_proxy':turnover,
             'last_price':closes[-1], 'strategy_eligible':not bool(exclusion_reason),
             'exclusion_reason':exclusion_reason
@@ -406,10 +419,12 @@ def calculate_scores(db: Session, config: dict):
                     side, reason = 'LONG', 'Positive-score leader in the liquidity shortlist'
                 else:
                     side, reason = 'WATCH', 'Shortlist leader but score is not positive; spot is long-only'
-            elif item.get('strategy_eligible', True) and product == 'futures' and pair in long_pairs:
-                side, reason = 'LONG', 'Highest-score leader in the futures shortlist'
-            elif item.get('strategy_eligible', True) and product == 'futures' and pair in short_pairs:
-                side, reason = 'SHORT', 'Lowest-score laggard in the futures shortlist'
+            elif item.get('strategy_eligible', True) and product == 'futures' and pair in long_pairs and item.get('score', 0) > 0 and item.get('momentum_72h_pct', 0) > 0 and item.get('momentum_24h_pct', 0) > 0:
+                side, reason = 'LONG', 'Positive 14D score with 72H and 24H trend confirmation'
+            elif item.get('strategy_eligible', True) and product == 'futures' and pair in short_pairs and item.get('score', 0) < 0 and item.get('momentum_72h_pct', 0) < 0 and item.get('momentum_24h_pct', 0) < 0:
+                side, reason = 'SHORT', 'Negative 14D score with 72H and 24H trend confirmation'
+            elif item.get('strategy_eligible', True) and product == 'futures' and (pair in long_pairs or pair in short_pairs):
+                side, reason = 'WATCH', 'Ranked candidate rejected: trend windows do not agree'
             elif item.get('strategy_eligible', True) and pair in liquid_pairs:
                 side, reason = 'WATCH', 'In the liquidity shortlist but not selected by signal rank'
             rows.append({**item, 'signal': side, 'signal_reason': reason,
@@ -444,20 +459,59 @@ def paper_equity(db: Session, product: str | None = None):
     return {'starting_capital_inr':start,'realized_pnl_inr':closed,'unrealized_pnl_inr':unrl,'equity_inr':start+closed+unrl}
 
 def mark_paper_positions(db: Session):
-    cfg=read_config(db,'strategy_config',{})
-    fx=float(cfg.get('inr_per_usdt',94.75))
-    prices={(s.product,s.pair):s.last_price for s in db.scalars(select(MarketSnapshot)).all()}
-    positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True)).all()
-    for p in positions:
-        price=prices.get((p.product,p.pair))
-        if price and p.entry_price:
-            direction=1 if p.side=='buy' else -1
-            p.last_mark_price=price
-            p.last_unrealized_pnl_inr=(price-p.entry_price)*p.quantity*direction*fx
+    """Mark paper positions and enforce protective exits on every fresh market poll."""
+    cfg = read_config(db, 'strategy_config', {})
+    fx = float(cfg.get('inr_per_usdt', 94.75))
+    now = utcnow()
+    snapshots = {(s.product, s.pair): s for s in db.scalars(select(MarketSnapshot)).all()}
+    positions = db.scalars(select(PaperPosition).where(PaperPosition.is_open == True)).all()
+    closed = 0
+    for pos in positions:
+        snap = snapshots.get((pos.product, pos.pair))
+        if not snap or not snap.last_price or not pos.entry_price:
+            continue
+        updated = snap.updated_at.replace(tzinfo=timezone.utc) if snap.updated_at.tzinfo is None else snap.updated_at
+        if (now - updated).total_seconds() > int(cfg.get('max_stale_seconds', 120)):
+            continue
+        last = float(snap.last_price)
+        # Use the executable side of the book for stop decisions, not a mid/last-price fantasy fill.
+        exit_price = float(snap.bid if pos.side == 'buy' else snap.ask) if (snap.bid if pos.side == 'buy' else snap.ask) else last
+        direction = 1 if pos.side == 'buy' else -1
+        pos.last_mark_price = last
+        pos.last_unrealized_pnl_inr = (last - pos.entry_price) * pos.quantity * direction * fx
+        adverse_move_pct = ((exit_price / pos.entry_price) - 1.0) * direction * 100.0
+        trade = db.get(Trade, pos.trade_id) if pos.trade_id else None
+        metadata = safe_json(trade.metadata_json if trade else '{}')
+        persistent_threshold = float(cfg.get('persistent_loss_move_pct', 0.35))
+        adverse_count = int(metadata.get('consecutive_adverse_observations', 0) or 0)
+        if adverse_move_pct <= -persistent_threshold:
+            adverse_count += 1
+        else:
+            adverse_count = 0
+        metadata['consecutive_adverse_observations'] = adverse_count
+        metadata['last_adverse_move_pct'] = round(adverse_move_pct, 5)
+        metadata['last_risk_check_at'] = now.isoformat()
+        if trade:
+            trade.metadata_json = json.dumps(metadata, separators=(',', ':'), default=str)
+        stop_pct = float(cfg.get('stop_loss_move_pct', 0.75))
+        required_count = max(1, int(cfg.get('persistent_loss_observations', 3)))
+        reason = None
+        if adverse_move_pct <= -stop_pct:
+            reason = f'hard stop: adverse price move {adverse_move_pct:.2f}% reached -{stop_pct:.2f}% limit'
+        elif adverse_count >= required_count:
+            reason = f'persistent loss: {adverse_count} consecutive checks at or beyond -{persistent_threshold:.2f}%'
+        if reason:
+            _close_paper_position(db, pos, exit_price, cfg, reason=reason)
+            log_event(db, f'Protective paper exit {pos.product} {pos.pair} {pos.side}: {reason}', 'WARNING', 'paper_risk',
+                      {'trade_id': pos.trade_id, 'entry_price': pos.entry_price, 'exit_price': exit_price,
+                       'adverse_move_pct': adverse_move_pct, 'stop_loss_move_pct': stop_pct})
+            closed += 1
     db.commit()
+    return {'marked': len(positions), 'protective_exits': closed}
 
-def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: dict, reason='daily rebalance'):
-    fx=float(cfg.get('inr_per_usdt',94.75)); lev=float(pos.leverage or 1)
+
+def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: dict, reason='signal rebalance exit'):
+    fx=float(cfg.get('inr_per_usdt',94.75))
     direction=1 if pos.side=='buy' else -1
     gross=(price-pos.entry_price)*pos.quantity*direction*fx
     fee_pct=float(cfg.get('spot_fee_pct' if pos.product=='spot' else 'futures_fee_pct',0.15 if pos.product=='spot' else 0.075))/100
@@ -466,7 +520,8 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
     exit_notional=abs(pos.quantity*price)
     entry_fee=entry_notional*fee_pct*fx; exit_fee=exit_notional*fee_pct*fx
     entry_slip=entry_notional*slip_pct*fx; exit_slip=exit_notional*slip_pct*fx
-    held_hours=max(0,(utcnow()-(pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at)).total_seconds()/3600)
+    opened = pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at
+    held_hours=max(0,(utcnow()-opened).total_seconds()/3600)
     funding=0.0
     if pos.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
         funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(held_hours/8)*fx
@@ -475,7 +530,13 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
         trade.closed_at=utcnow(); trade.exit_price=price; trade.gross_pnl_inr=gross
         trade.fees_inr=entry_fee+exit_fee; trade.slippage_inr=entry_slip+exit_slip; trade.funding_inr=funding
         trade.net_pnl_inr=gross-trade.fees_inr-trade.slippage_inr-funding; trade.status='closed'; trade.reason=reason
+        metadata=safe_json(trade.metadata_json)
+        metadata['held_seconds']=int((trade.closed_at-opened).total_seconds())
+        metadata['held_minutes']=round(metadata['held_seconds']/60.0,2)
+        metadata['exit_reason']=reason
+        trade.metadata_json=json.dumps(metadata,separators=(',',':'),default=str)
     pos.is_open=False; pos.last_mark_price=price; pos.last_unrealized_pnl_inr=0
+
 
 def run_paper_cycle(db: Session, force: bool = False):
     cfg=read_config(db,'strategy_config',{})
@@ -493,61 +554,120 @@ def run_paper_cycle(db: Session, force: bool = False):
         runtime['paper_cycle_status']='skipped'; runtime['paper_cycle_message']=msg; runtime['paper_cycle_attempted_at']=utcnow().isoformat(); write_config(db,'runtime',runtime)
         log_event(db,msg,'WARNING','strategy',diagnostics); db.commit()
         return {'ok':False,'message':msg,'diagnostics':diagnostics}
-    fx=float(cfg.get('inr_per_usdt',94.75)); starting_eq=paper_equity(db)['equity_inr']
+
+    fx=float(cfg.get('inr_per_usdt',94.75))
     selected=[]
+    def trend_confirmed(item, side):
+        score=float(item.get('score') or 0)
+        m24=float(item.get('momentum_24h_pct') or 0)
+        m72=float(item.get('momentum_72h_pct') or 0)
+        if side=='buy':
+            return score > 0 and m24 > 0 and m72 > 0
+        return score < 0 and m24 < 0 and m72 < 0
+
     if cfg.get('product_mode') in ('spot','both') and 'spot' in products:
-        pos=[x for x in products['spot']['longs'] if x['score']>0]
-        selected += [('spot',x,'buy',1) for x in pos]
+        for item in products['spot']['longs']:
+            if trend_confirmed(item,'buy'):
+                selected.append(('spot',item,'buy',1))
+            else:
+                log_event(db,f"Skipped spot entry {item['pair']}: 14D/72H/24H direction not aligned.",'INFO','strategy_gate')
     if cfg.get('product_mode') in ('futures','both') and 'futures' in products:
         lev=float(cfg.get('futures_leverage',1))
-        selected += [('futures',x,'buy',lev) for x in products['futures']['longs']]
-        selected += [('futures',x,'sell',lev) for x in products['futures']['shorts']]
-    # Close/reconcile current paper positions at current fresh, verified market marks.
-    positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True)).all()
+        for item in products['futures']['longs']:
+            if trend_confirmed(item,'buy'):
+                selected.append(('futures',item,'buy',lev))
+            else:
+                log_event(db,f"Skipped futures long {item['pair']}: 14D/72H/24H direction not aligned.",'INFO','strategy_gate')
+        for item in products['futures']['shorts']:
+            if trend_confirmed(item,'sell'):
+                selected.append(('futures',item,'sell',lev))
+            else:
+                log_event(db,f"Skipped futures short {item['pair']}: 14D/72H/24H direction not aligned.",'INFO','strategy_gate')
+
+    # Apply current liquidity, spread and expected-move-vs-cost gates before any entry or rebalance decision.
     snap_map={(x.product,x.pair):x for x in db.scalars(select(MarketSnapshot)).all()}
-    for p in positions:
-        snap=snap_map.get((p.product,p.pair))
-        if snap and snap.last_price and (utcnow()-(snap.updated_at.replace(tzinfo=timezone.utc) if snap.updated_at.tzinfo is None else snap.updated_at)).total_seconds()<int(cfg.get('max_stale_seconds',120)):
-            _close_paper_position(db,p,float(snap.last_price),cfg)
-        else:
-            log_event(db,f'Cannot close paper position {p.product} {p.pair}: no fresh mark; preserving it.', 'WARNING','paper')
-    db.flush()
-    eq=paper_equity(db)['equity_inr']
-    # Only select candidates with current snapshot and active, liquid market checks.
     viable=[]
-    for product, item, side, lev in selected:
+    for product,item,side,lev in selected:
         snap=snap_map.get((product,item['pair']))
         ok,why=market_eligibility(snap,cfg) if snap else (False,'no market snapshot')
-        if ok: viable.append((product,item,side,lev,snap))
-        else: log_event(db,f'Skipped paper entry {product} {item["pair"]}: {why}', 'WARNING','strategy')
-    futures= [x for x in viable if x[0]=='futures']; spots=[x for x in viable if x[0]=='spot']
-    for product, items in [('futures',futures),('spot',spots)]:
-        if not items: continue
-        # Research paper book is intentionally not constrained by configured capital.
-        # Each signal gets a fixed notional so aggregate strategy capacity can be measured;
-        # the separate Capital page continues to show account-sized exposure/equity.
-        # This is simulation only and does not imply real margin availability.
-        each_notional=float(cfg.get('research_notional_usdt', 1000.0))
-        for product,item,side,lev,snap in items:
-            price=float(snap.last_price); qty=each_notional/price
-            fee_pct=float(cfg.get('spot_fee_pct' if product=='spot' else 'futures_fee_pct',0.15 if product=='spot' else 0.075))/100
-            slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
-            fees=each_notional*fee_pct*fx; slips=each_notional*slip_pct*fx
-            trade=Trade(run_mode='paper',product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,leverage=lev,
-                        fees_inr=fees,slippage_inr=slips,net_pnl_inr=-(fees+slips),gross_pnl_inr=0,status='open',strategy=STRATEGY_ID,
-                        reason='entry: daily UTC cross-sectional rebalance',metadata_json=json.dumps({'score':item['score'],'momentum_pct':item['momentum_pct'],'liquidity_turnover_proxy':item['turnover_proxy']}))
-            db.add(trade); db.flush()
-            db.add(PaperPosition(product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,notional_usdt=each_notional,leverage=lev,
-                                 opened_at=utcnow(),strategy=STRATEGY_ID,trade_id=trade.id,last_mark_price=price,last_unrealized_pnl_inr=0,is_open=True))
+        if not ok:
+            log_event(db,f"Skipped paper entry {product} {item['pair']}: {why}",'WARNING','strategy_gate')
+            continue
+        spread=market_spread_bps(snap.bid,snap.ask)
+        hurdle=_entry_cost_hurdle_pct(product,cfg,snap)
+        expected=float(item.get('expected_move_pct') or 0)
+        minimum=max(float(cfg.get('min_expected_move_pct',0.75)),
+                    (hurdle or 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
+        if hurdle is None or expected < minimum:
+            log_event(db,f"Skipped paper entry {product} {item['pair']}: estimated move {expected:.3f}% does not clear cost hurdle {minimum:.3f}% (round-trip costs {hurdle if hurdle is not None else 'unknown'}%).",
+                      'INFO','strategy_gate',{'expected_move_pct':expected,'round_trip_cost_pct':hurdle,'required_move_pct':minimum,'spread_bps':spread})
+            continue
+        viable.append((product,item,side,lev,snap,hurdle,expected))
+
+    # Reconcile only positions that no longer qualify or whose target side changed.
+    # Never liquidate a still-valid position simply because a scheduled scan ran.
+    desired={(product,item['pair']):(side,product,item,lev,snap,hurdle,expected)
+             for product,item,side,lev,snap,hurdle,expected in viable}
+    open_positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True)).all()
+    for pos in open_positions:
+        key=(pos.product,pos.pair)
+        target=desired.get(key)
+        if target and target[0]==pos.side:
+            continue
+        snap=snap_map.get(key)
+        if snap and snap.last_price:
+            age=(utcnow()-(snap.updated_at.replace(tzinfo=timezone.utc) if snap.updated_at.tzinfo is None else snap.updated_at)).total_seconds()
+            if age < int(cfg.get('max_stale_seconds',120)):
+                px=(snap.bid if pos.side=='buy' else snap.ask) or snap.last_price
+                reason='signal no longer qualifies after costs/trend checks' if not target else 'signal direction changed'
+                _close_paper_position(db,pos,float(px),cfg,reason=reason)
+            else:
+                log_event(db,f"Preserving {pos.product} {pos.pair}: cannot safely rebalance without fresh mark.",'WARNING','paper_risk')
+        else:
+            log_event(db,f"Preserving {pos.product} {pos.pair}: cannot safely rebalance without fresh mark.",'WARNING','paper_risk')
+    db.flush()
+    still_open={(p.product,p.pair):p for p in db.scalars(select(PaperPosition).where(PaperPosition.is_open==True)).all()}
+    opened=0
+    for product,item,side,lev,snap,hurdle,expected in viable:
+        key=(product,item['pair'])
+        if key in still_open:
+            # Same market and same direction is retained; never duplicate an open position.
+            continue
+        price=float(snap.ask if side=='buy' else snap.bid)
+        if price <= 0 or not math.isfinite(price):
+            log_event(db,f"Skipped paper entry {product} {item['pair']}: invalid executable entry quote.",'WARNING','strategy_gate')
+            continue
+        each_notional=float(cfg.get('research_notional_usdt',1000.0))
+        qty=each_notional/price
+        fee_pct=float(cfg.get('spot_fee_pct' if product=='spot' else 'futures_fee_pct',0.15 if product=='spot' else 0.075))/100
+        slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
+        fees=each_notional*fee_pct*fx; slips=each_notional*slip_pct*fx
+        trade=Trade(run_mode='paper',product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,leverage=lev,
+                    fees_inr=fees,slippage_inr=slips,net_pnl_inr=-(fees+slips),gross_pnl_inr=0,status='open',strategy=STRATEGY_ID,
+                    reason='entry: trend-confirmed signal clears estimated round-trip cost hurdle',
+                    metadata_json=json.dumps({'score':item['score'],'momentum_pct':item['momentum_pct'],
+                        'momentum_24h_pct':item.get('momentum_24h_pct'),'momentum_72h_pct':item.get('momentum_72h_pct'),
+                        'expected_move_pct':expected,'estimated_round_trip_cost_pct':hurdle,
+                        'required_move_pct':max(float(cfg.get('min_expected_move_pct',0.75)),hurdle*float(cfg.get('cost_coverage_multiple',1.5))),
+                        'liquidity_turnover_proxy':item['turnover_proxy'],'entry_bid':snap.bid,'entry_ask':snap.ask}))
+        db.add(trade); db.flush()
+        db.add(PaperPosition(product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,notional_usdt=each_notional,leverage=lev,
+                             opened_at=utcnow(),strategy=STRATEGY_ID,trade_id=trade.id,last_mark_price=price,last_unrealized_pnl_inr=0,is_open=True))
+        opened+=1
     cfg['paper_last_cycle']=utcnow().isoformat(); cfg['last_error']=None; write_config(db,'strategy_config',cfg)
     runtime=read_config(db,'runtime',{})
-    runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'ok','scan_universe_count':runtime.get('scan_universe_count',0),'signals':{k:len(v.get('all_scored',[])) for k,v in products.items()},'opened_positions':len(viable),'selected_signals':len(selected),'eligible_signals':len(viable),'candle_diagnostics':diagnostics,'paper_engine_version':PAPER_ENGINE_VERSION}
+    runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'ok','scan_universe_count':runtime.get('scan_universe_count',0),
+        'signals':{k:len(v.get('all_scored',[])) for k,v in products.items()},
+        'opened_positions':opened,'selected_signals':len(selected),'eligible_signals':len(viable),
+        'candle_diagnostics':diagnostics,'paper_engine_version':PAPER_ENGINE_VERSION}
     runtime['paper_cycle_status']='completed'
-    runtime['paper_cycle_message']=f'Cycle completed; scored {sum(len(v.get("all_scored",[])) for v in products.values())} pairs and opened {len(viable)} positions.'
+    runtime['paper_cycle_message']=f"Cycle completed; scored {sum(len(v.get('all_scored',[])) for v in products.values())} product/pair records, opened {opened}, retained {len(still_open)} existing positions and rejected {len(selected)-len(viable)} candidates at market/cost gates."
     runtime['paper_cycle_attempted_at']=utcnow().isoformat(); write_config(db,'runtime',runtime)
-    log_event(db,f'Paper strategy cycle completed: {len(viable)} candidate positions opened across enabled products.', 'INFO','paper', {'strategy':STRATEGY_ID,'selected':[{ 'product':p,'pair':i['pair'],'side':s,'score':i['score']} for p,i,s,l,ss in viable], 'diagnostics':diagnostics})
+    log_event(db,f"Paper strategy cycle completed: {opened} new positions opened; {len(still_open)} retained.",'INFO','paper',
+              {'strategy':STRATEGY_ID,'selected':[{'product':p,'pair':i['pair'],'side':side,'score':i['score']} for p,i,side,lev,snap,hurdle,expected in viable],
+               'diagnostics':diagnostics})
     db.commit()
-    return {'ok':True,'message':f'Paper strategy cycle complete; opened {len(viable)} positions.','signals':products,'opened_positions':len(viable),'diagnostics':diagnostics}
+    return {'ok':True,'message':runtime['paper_cycle_message'],'signals':products,'opened_positions':opened,'diagnostics':diagnostics}
 
 def dashboard_summary(db: Session):
     cfg=read_config(db,'strategy_config',{}); live=read_config(db,'live_state',{}); runtime=read_config(db,'runtime',{})
