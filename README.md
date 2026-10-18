@@ -1,4 +1,14 @@
-# CoinDCX Strategy Terminal (v1.4.1)
+# CoinDCX Strategy Terminal (v1.4.3)
+
+## Live scan / response parsing / UI fix (v1.4.3)
+
+- The exchange-discovered market universe is ranked by the reported spot ticker base volume × last price and capped at 60 unique USDT pairs by default (configurable up to 150). It is not a market-cap ranking; liquidity and turnover are screening proxies.
+- Spot ticker symbols are normalized from the concatenated CoinDCX format (for example, `BTCUSDT`) to the canonical app pair (for example, `B-BTC_USDT`) using market-details metadata where available.
+- Futures current prices now unwrap the documented `prices` map, and futures candles unwrap the `{s, data}` response.
+- Candle scoring uses the same discovered, capped universe that the scan UI displays. It refreshes opportunities every 15 minutes while portfolio rebalancing remains daily.
+- The Paper Trading page shows scanned product/pair rows, price / turnover proxy / spread, candle readiness, score / momentum, strategy signal and reason, liquidity gate, and paper position/trade state. It also shows counts and explicit worker/API/stale-data errors.
+- The market list is based on exchange data; it does not invent mock market prices. Futures liquidation remains a simplified estimate, not an exchange-verified historical liquidation event.
+- Live orders remain disabled by default. The scan and paper-trading page do not submit live orders.
 
 ## Paper scheduler and scanner fix (v1.4.1)
 

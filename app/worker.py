@@ -2,13 +2,14 @@
 import os, time, traceback
 from datetime import datetime, timezone, timedelta
 from .db import Base, engine, SessionLocal
-from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, run_paper_cycle, log_event
+from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, calculate_scores, run_paper_cycle, log_event
 from .coindcx import CoinDCXClient
 from .live_engine import reconcile_live_account, collect_market_telemetry, run_auto_live_cycle
 
 POLL_SECONDS=max(20, int(os.getenv('MARKET_DATA_POLL_SECONDS','60')))
 RECONCILE_SECONDS=max(120, int(os.getenv('LIVE_RECONCILE_SECONDS','300')))
 PAPER_RETRY_SECONDS=max(60, int(os.getenv('PAPER_CYCLE_RETRY_SECONDS','900')))
+PAPER_SCORE_REFRESH_SECONDS=max(300, int(os.getenv('PAPER_SCORE_REFRESH_SECONDS','900')))
 
 
 def _due(value, seconds):
@@ -71,6 +72,19 @@ def main():
                 if cfg.get('paper_enabled'):
                     runtime=read_config(db,'runtime',{})
                     due, queued_request=paper_cycle_due(cfg,runtime)
+                    # Keep opportunity scores live while the portfolio rebalance remains daily.
+                    if not due and _due(runtime.get('paper_score_refresh_at'), PAPER_SCORE_REFRESH_SECONDS):
+                        score_result=calculate_scores(db,cfg)
+                        diag=score_result.get('_diagnostics',{}) if isinstance(score_result,dict) else {}
+                        refreshed_at=diag.get('as_of') or datetime.now(timezone.utc).isoformat()
+                        runtime=read_config(db,'runtime',{})
+                        runtime['paper_score_refresh_at']=refreshed_at
+                        runtime['paper_score_refresh_status']='completed' if diag.get('candle_ready_total',0)>0 else 'waiting_for_candle_history'
+                        runtime['paper_score_refresh_message']=f"Scored {sum((diag.get('scored_pairs') or {}).values())} product/pair records; {diag.get('candle_ready_total',0)} candle-ready records across {diag.get('requested_pairs',0)} unique markets."
+                        write_config(db,'runtime',runtime)
+                        if diag.get('fetch_error_count',0):
+                            log_event(db,'Scheduled paper opportunity scan had candle API errors.','WARNING','strategy_scan',diag)
+                        db.commit()
                     if due:
                         attempted_at=datetime.now(timezone.utc).isoformat()
                         runtime['paper_cycle_attempted_at']=attempted_at
@@ -84,6 +98,8 @@ def main():
                         runtime['paper_cycle_status']='completed' if result.get('ok') else 'skipped'
                         runtime['paper_cycle_message']=result.get('message','Paper cycle returned no status message.')
                         runtime['paper_cycle_attempted_at']=datetime.now(timezone.utc).isoformat()
+                        runtime['paper_score_refresh_at']=(runtime.get('paper_candle_diagnostics') or {}).get('as_of') or runtime['paper_cycle_attempted_at']
+                        runtime['paper_score_refresh_status']='completed' if (runtime.get('paper_candle_diagnostics') or {}).get('candle_ready_total',0)>0 else 'waiting_for_candle_history'
                         if queued_request:
                             runtime['paper_request_handled_at']=queued_request
                         write_config(db,'runtime',runtime)

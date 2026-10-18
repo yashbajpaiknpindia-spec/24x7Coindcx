@@ -118,17 +118,48 @@ def refresh_markets(db: Session):
     # by observed quote turnover proxy and scan a configurable broad candidate set.
     # This is a discovery universe, not a claim that every market is tradeable.
     broad_limit = max(20, min(150, env_int('SCAN_UNIVERSE_LIMIT', 60)))
+    # Public CoinDCX spot tickers use concatenated symbols (BTCUSDT), while app
+    # pairs use B-BTC_USDT. Map via market details before ranking; otherwise the
+    # scanner silently falls back to the legacy 14-pair watchlist.
+    details_by_ticker = {}
+    for detail in spot_details if isinstance(spot_details, list) else []:
+        if not isinstance(detail, dict): continue
+        ticker_name = detail.get('coindcx_name') or detail.get('market') or detail.get('symbol') or detail.get('pair')
+        target = str(detail.get('target_currency_short_name') or '').upper().strip()
+        quote = str(detail.get('base_currency_short_name') or '').upper().strip()
+        if ticker_name:
+            details_by_ticker[norm_pair(ticker_name)] = detail
+        if ticker_name and target and quote:
+            details_by_ticker[norm_pair(ticker_name)]['_canonical_pair'] = f'B-{target}_{quote}'
+
     ranked = []
     for t in spot_tickers if isinstance(spot_tickers, list) else []:
         if not isinstance(t, dict): continue
-        name = str(t.get('market') or t.get('pair') or t.get('symbol') or '').upper()
-        if not name.endswith('USDT') or not name.startswith('B-'): continue
+        raw_name = str(t.get('market') or t.get('pair') or t.get('symbol') or '').upper().strip()
+        if not raw_name: continue
+        detail = details_by_ticker.get(norm_pair(raw_name), {})
+        canonical = str(detail.get('_canonical_pair') or '').upper()
+        if raw_name.startswith('B-') and raw_name.endswith('_USDT'):
+            pair = raw_name
+        elif canonical.startswith('B-') and canonical.endswith('_USDT'):
+            pair = canonical
+        elif raw_name.endswith('USDT') and len(raw_name) > 4:
+            pair = f'B-{raw_name[:-4]}_USDT'
+        else:
+            continue
+        if not pair.startswith('B-') or not pair.endswith('_USDT'): continue
         price = num(t.get('last_price') or t.get('lastPrice') or t.get('close') or t.get('last'))
         volume = num(t.get('volume') or t.get('base_volume') or t.get('vol'))
-        if price and volume is not None and volume >= 0: ranked.append((price*volume, name))
+        if price is not None and price > 0 and volume is not None and volume >= 0:
+            ranked.append((price*volume, pair))
     ranked.sort(reverse=True)
-    discovered = [pair for _, pair in ranked[:broad_limit]]
-    scan_universe = list(dict.fromkeys(PAIR_UNIVERSE + discovered))
+    discovered = list(dict.fromkeys(pair for _, pair in ranked))
+    # The configured limit is the total unique universe, not 60 + the seed watchlist.
+    scan_universe = discovered[:broad_limit]
+    for seed_pair in PAIR_UNIVERSE:
+        if len(scan_universe) >= broad_limit: break
+        if seed_pair not in scan_universe: scan_universe.append(seed_pair)
+    if not scan_universe: scan_universe = PAIR_UNIVERSE[:broad_limit]
 
     # Futures price events often omit the top bid/ask. Pull live top-of-book
     # snapshots, otherwise the liquidity filter must reject the market.
@@ -172,7 +203,7 @@ def refresh_markets(db: Session):
             return None
         return best(book.get('bids'), 'bid'), best(book.get('asks'), 'ask')
     ticker_map = {norm_pair(x.get('market') or x.get('pair') or x.get('symbol')): x for x in spot_tickers if isinstance(x, dict)}
-    details_map = {norm_pair(x.get('pair') or x.get('market')): x for x in spot_details if isinstance(x, dict)}
+    details_map = {norm_pair(x.get('coindcx_name') or x.get('pair') or x.get('market') or x.get('symbol')): x for x in spot_details if isinstance(x, dict)}
     future_map = {norm_pair(x.get('mkt') or x.get('pair') or x.get('market') or x.get('s') or x.get('symbol')): x for x in futures_prices if isinstance(x, dict)}
     if isinstance(futures_active, dict):
         futures_active = futures_active.get('data', futures_active.get('instruments', []))
@@ -270,10 +301,17 @@ def normalize_candles(rows):
 def calculate_scores(db: Session, config: dict):
     client = CoinDCXClient()
     runtime = read_config(db, 'runtime', {})
-    # Score the exchange-discovered universe as well as the legacy seed list.
-    # Previously refresh_markets discovered dozens of pairs but this function
-    # continued fetching candles for only the original 14.
-    universe = list(dict.fromkeys((config.get('pair_universe') or PAIR_UNIVERSE) + (runtime.get('scan_universe_pairs') or [])))
+    # Score the same unique market universe shown by the scanner. The live
+    # discovery list is already ranked and capped; seeds are only a fallback
+    # when discovery has not run yet, otherwise prepending them can silently
+    # inflate 60 markets to 74 and change the ranked opportunities.
+    discovered = runtime.get('scan_universe_pairs') or []
+    if discovered:
+        universe = list(dict.fromkeys(discovered))
+    else:
+        universe = list(dict.fromkeys(config.get('pair_universe') or PAIR_UNIVERSE))
+    universe_limit = max(20, min(150, int(runtime.get('scan_universe_limit') or env_int('SCAN_UNIVERSE_LIMIT', 60))))
+    universe = universe[:universe_limit]
     frames=[]; fetch_errors=[]
     def load(pair, product):
         rows = client.spot_candles(pair,'1h',500) if product=='spot' else client.futures_candles(pair,60,500)
@@ -317,12 +355,45 @@ def calculate_scores(db: Session, config: dict):
         liquid.sort(key=lambda x:x['score'])
         score_results[product]={'liquid_universe':liquid,'all_scored':items,'longs':sorted(liquid,key=lambda x:x['score'],reverse=True)[:int(config.get('long_count',3))],
                                'shorts':liquid[:int(config.get('short_count',3))]}
+    # Persist the scored rows for a live UI table, independently of the paper rebalance.
+    strategy_scan = {}
+    for product in ('spot', 'futures'):
+        result = score_results.get(product)
+        if not isinstance(result, dict):
+            strategy_scan[product] = []
+            continue
+        items = result.get('all_scored', [])
+        liquid_pairs = {x['pair'] for x in result.get('liquid_universe', [])}
+        long_pairs = {x['pair'] for x in result.get('longs', [])}
+        short_pairs = {x['pair'] for x in result.get('shorts', [])}
+        ranked_score = sorted(items, key=lambda x: x.get('score', 0), reverse=True)
+        score_rank = {x['pair']: i + 1 for i, x in enumerate(ranked_score)}
+        rows = []
+        for item in items:
+            pair = item['pair']
+            side, reason = 'NONE', 'Outside the strategy shortlist'
+            if product == 'spot' and pair in long_pairs:
+                if item.get('score', 0) > 0:
+                    side, reason = 'LONG', 'Positive-score leader in the liquidity shortlist'
+                else:
+                    side, reason = 'WATCH', 'Shortlist leader but score is not positive; spot is long-only'
+            elif product == 'futures' and pair in long_pairs:
+                side, reason = 'LONG', 'Highest-score leader in the futures shortlist'
+            elif product == 'futures' and pair in short_pairs:
+                side, reason = 'SHORT', 'Lowest-score laggard in the futures shortlist'
+            elif pair in liquid_pairs:
+                side, reason = 'WATCH', 'In the liquidity shortlist but not selected by signal rank'
+            rows.append({**item, 'signal': side, 'signal_reason': reason,
+                         'liquid_shortlist': pair in liquid_pairs, 'strategy_rank': score_rank.get(pair)})
+        strategy_scan[product] = rows
+
     score_results['_diagnostics']={'requested_pairs':len(universe),'products_requested':enabled_products,'candle_responses':candle_counts,
         'candle_ready_pairs':usable_pairs,'candle_ready_total':candle_ready,'fetch_error_count':len(fetch_errors),
         'fetch_errors':fetch_errors[:10],'scored_pairs':{k:len(v.get('all_scored',[])) for k,v in score_results.items() if k in ('spot','futures')},
         'as_of':utcnow().isoformat()}
     runtime=read_config(db,'runtime',{})
     runtime['paper_candle_diagnostics']=score_results['_diagnostics']
+    runtime['paper_strategy_scan']={'as_of':score_results['_diagnostics']['as_of'],'strategy_id':STRATEGY_ID,'products':strategy_scan}
     write_config(db,'runtime',runtime)
     return score_results
 

@@ -83,7 +83,17 @@ class CoinDCXClient:
 
     def futures_prices(self):
         data = self.public_get('/market_data/v3/current_prices/futures/rt', base=PUBLIC)
-        if isinstance(data, dict) and 'data' in data: data = data['data']
+        # The documented endpoint returns {ts, vs, prices:{'B-BTC_USDT':{...}}}.
+        # Older parsing treated ts/vs/prices themselves as price rows, leaving all
+        # futures snapshots with missing prices. Also accept older `data` wrappers.
+        if isinstance(data, dict) and isinstance(data.get('prices'), dict):
+            prices = data['prices']
+            return [dict(v, mkt=(v.get('mkt') or k)) for k, v in prices.items() if isinstance(v, dict)]
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+            if isinstance(data, dict) and isinstance(data.get('prices'), dict):
+                prices = data['prices']
+                return [dict(v, mkt=(v.get('mkt') or k)) for k, v in prices.items() if isinstance(v, dict)]
         if isinstance(data, list): return data
         if isinstance(data, dict): return [dict(v, mkt=k) if isinstance(v, dict) else {'mkt': k, 'ls': v} for k,v in data.items()]
         return []
@@ -100,6 +110,11 @@ class CoinDCXClient:
         now = int(time.time())
         start = now - (max(1, min(limit, 1000)) * resolution * 60)
         data = self.public_get('/market_data/candlesticks', params={'pair': pair, 'from': start, 'to': now, 'resolution': resolution, 'pcode': 'f'}, base=PUBLIC)
+        # Futures candles use {"s":"ok","data":[...]}; reject explicit error statuses.
+        if isinstance(data, dict):
+            if str(data.get('s', 'ok')).lower() not in ('ok', 'success', 'true'):
+                return []
+            data = data.get('data', [])
         if not isinstance(data, list): return []
         normalized = []
         for row in data:
