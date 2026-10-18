@@ -16,5 +16,6 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m compileall -q app
+      - run: python -c "from jinja2 import Environment; from pathlib import Path; Environment().parse(Path('app/templates/paper.html').read_text())"
       - run: python tests_paper_risk_controls.py
       - run: python tests_paper_decision_audit.py
