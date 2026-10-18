@@ -6,9 +6,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
@@ -54,7 +54,7 @@ def health():
     try:
         with SessionLocal() as db:
             db.execute(select(ConfigKV.key).limit(1)).all()
-        return {'ok': True, 'service': APP_NAME, 'version': '1.4.5', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
+        return {'ok': True, 'service': APP_NAME, 'version': '1.6.0', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
     except Exception as exc:
         return JSONResponse({'ok': False, 'error': str(exc)[:200]}, status_code=503)
 
@@ -181,9 +181,21 @@ def paper_page(request: Request):
         positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True).order_by(desc(PaperPosition.opened_at))).all()
         trades=db.scalars(select(Trade).where(Trade.run_mode=='paper').order_by(desc(Trade.created_at)).limit(100)).all()
         closed=db.scalars(select(Trade).where(Trade.run_mode=='paper',Trade.status=='closed')).all()
+        capital_positions=db.scalars(select(PaperModePosition).where(PaperModePosition.is_open==True).order_by(desc(PaperModePosition.opened_at))).all()
+        capital_trades=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital').order_by(desc(Trade.created_at)).limit(100)).all()
+        capital_closed=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital',Trade.status=='closed')).all()
+        observation_count=db.scalar(select(func.count(MarketObservation.id))) or 0
     now_utc=datetime.now(timezone.utc)
     fx=float(cfg.get('inr_per_usdt',94.75))
     for p in positions:
+        opened=p.opened_at.replace(tzinfo=timezone.utc) if p.opened_at.tzinfo is None else p.opened_at.astimezone(timezone.utc)
+        p.held_minutes=max(0,(now_utc-opened).total_seconds()/60)
+        p.invested_usdt=float(p.notional_usdt or abs(p.quantity*p.entry_price))
+        p.invested_inr=p.invested_usdt*fx
+        p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
+        stop=float(cfg.get('stop_loss_move_pct',0.75))/100
+        p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for p in capital_positions:
         opened=p.opened_at.replace(tzinfo=timezone.utc) if p.opened_at.tzinfo is None else p.opened_at.astimezone(timezone.utc)
         p.held_minutes=max(0,(now_utc-opened).total_seconds()/60)
         p.invested_usdt=float(p.notional_usdt or abs(p.quantity*p.entry_price))
@@ -202,7 +214,17 @@ def paper_page(request: Request):
     stats={'closed':len(closed),'wins':wins,'losses':losses,'win_rate':(100*wins/len(closed) if closed else None),
            'profit_factor':(sum(t.net_pnl_inr for t in closed if (t.net_pnl_inr or 0)>0)/abs(sum(t.net_pnl_inr for t in closed if (t.net_pnl_inr or 0)<0)) if any((t.net_pnl_inr or 0)<0 for t in closed) else None),
            'net_pnl_inr':sum(t.net_pnl_inr or 0 for t in closed)}
-    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats))
+    capital_wins=sum(1 for t in capital_closed if (t.net_pnl_inr or 0)>0)
+    capital_losses=abs(sum(t.net_pnl_inr or 0 for t in capital_closed if (t.net_pnl_inr or 0)<0))
+    capital_gain=sum(t.net_pnl_inr or 0 for t in capital_closed if (t.net_pnl_inr or 0)>0)
+    capital_net=sum(t.net_pnl_inr or 0 for t in capital_closed)
+    capital_reserved=sum(float(p.notional_usdt or 0)*fx/max(float(p.leverage or 1),1.0) for p in capital_positions)
+    capital_stats={'closed':len(capital_closed),'wins':capital_wins,'losses':sum(1 for t in capital_closed if (t.net_pnl_inr or 0)<0),
+        'win_rate':(100*capital_wins/len(capital_closed) if capital_closed else None),
+        'profit_factor':(capital_gain/capital_losses if capital_losses>0 else None),'net_pnl_inr':capital_net,
+        'open':len(capital_positions),'reserved_margin_inr':capital_reserved,'capital_inr':float(cfg.get('starting_capital_inr',30000)),
+        'available_margin_inr':max(0.0,float(cfg.get('starting_capital_inr',30000))-capital_reserved)}
+    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats,capital_positions=capital_positions,capital_trades=capital_trades,capital_stats=capital_stats,observation_count=observation_count))
 
 @app.post('/paper/start')
 def paper_start(request: Request):
@@ -254,6 +276,48 @@ def api_paper_status(request: Request):
             'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0}
 
 
+
+
+@app.get('/api/system-health')
+def api_system_health(request: Request):
+    """Bounded operational telemetry: process RSS, configured memory ceiling, and DB footprint."""
+    if not authed(request):
+        return JSONResponse({'error':'login_required'}, status_code=401)
+    memory_bytes=None
+    try:
+        with open('/proc/self/status','r',encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    memory_bytes=int(line.split()[1])*1024
+                    break
+    except Exception:
+        pass
+    memory_limit=int(float(os.getenv('RENDER_MEMORY_LIMIT_MB','512'))*1024*1024)
+    db_info={'engine':engine.dialect.name,'database_bytes':None,'table_bytes':None,'allocated_disk_bytes':int(float(os.getenv('DB_DISK_GB','15'))*1024**3),'observation_rows':0,'market_snapshot_rows':0,'trade_rows':0,'event_rows':0,'history_window_days':30,'history_hard_row_cap':100000}
+    try:
+        with SessionLocal() as db:
+            db_info['observation_rows']=db.scalar(select(func.count(MarketObservation.id))) or 0
+            db_info['market_snapshot_rows']=db.scalar(select(func.count(MarketSnapshot.id))) or 0
+            db_info['trade_rows']=db.scalar(select(func.count(Trade.id))) or 0
+            db_info['event_rows']=db.scalar(select(func.count(Event.id))) or 0
+            if engine.dialect.name=='postgresql':
+                row=db.execute(text("SELECT pg_database_size(current_database()) AS db_bytes")).mappings().first()
+                if row: db_info['database_bytes']=int(row['db_bytes'])
+                row=db.execute(text("SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname)||'.'||quote_ident(tablename))),0) AS table_bytes FROM pg_tables WHERE schemaname='public'")).mappings().first()
+                if row: db_info['table_bytes']=int(row['table_bytes'])
+            elif engine.dialect.name=='sqlite':
+                row=db.execute(text('PRAGMA page_count')).scalar() or 0
+                pagesize=db.execute(text('PRAGMA page_size')).scalar() or 0
+                db_info['database_bytes']=int(row*pagesize)
+                db_info['table_bytes']=db_info['database_bytes']
+    except Exception as exc:
+        db_info['error']=str(exc)[:180]
+    used=db_info.get('database_bytes')
+    db_info['estimated_disk_remaining_bytes']=max(0,db_info['allocated_disk_bytes']-used) if used is not None else None
+    return {'as_of':datetime.now(timezone.utc).isoformat(),'process_memory_rss_bytes':memory_bytes,
+        'memory_limit_bytes':memory_limit,'memory_used_pct':round(memory_bytes/memory_limit*100,2) if memory_bytes is not None and memory_limit else None,
+        'memory_remaining_bytes':max(0,memory_limit-memory_bytes) if memory_bytes is not None else None,'database':db_info,
+        'note':'RSS is this web process, not a replacement for Render service-level peak metrics. Database remaining space is an estimate from configured disk size minus database size.'}
 
 @app.get('/api/paper-scan-results')
 def api_paper_scan_results(request: Request):
