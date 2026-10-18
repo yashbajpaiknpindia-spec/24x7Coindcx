@@ -193,9 +193,12 @@ def paper_page(request: Request):
             rejected=[a for a in group if a.decision=='rejected']
             accepted=[a for a in group if a.decision=='accepted']
             data={'decisions':len(group),'rejected':len(rejected),'accepted':len(accepted),'reasons':{}}
+            def reason_key(a):
+                return (a.rejection_reason or 'unspecified').split(':',1)[0][:100]
             for a in rejected:
-                reason=(a.rejection_reason or 'unspecified').split(':',1)[0][:100]
-                data['reasons'][reason]=data['reasons'].get(reason,0)+1
+                reason=reason_key(a)
+                data['reasons'].setdefault(reason,{'count':0,'1h':{},'4h':{},'24h':{}})
+                data['reasons'][reason]['count']+=1
             for horizon in ('1h','4h','24h'):
                 flag='evaluated_'+horizon; net='net_outcome_'+horizon+'_pct'
                 evaluated=[a for a in rejected if getattr(a,flag)]
@@ -206,6 +209,13 @@ def paper_page(request: Request):
                     'likely_correct':len(right_rejections),'false_rejection_rate_pct':100*len(false_rejections)/len(evaluated) if evaluated else None,
                     'accepted_evaluated':len(accepted_eval),'accepted_wins':sum(1 for a in accepted_eval if getattr(a,net)>0),
                     'accepted_net_avg_pct':sum(getattr(a,net) for a in accepted_eval)/len(accepted_eval) if accepted_eval else None}
+                for reason,reason_data in data['reasons'].items():
+                    reason_rows=[a for a in rejected if reason_key(a)==reason and getattr(a,flag) and getattr(a,net) is not None]
+                    reason_wins=[a for a in reason_rows if getattr(a,net)>0]
+                    reason_losses=[a for a in reason_rows if getattr(a,net)<=0]
+                    reason_data[horizon]={'evaluated':len(reason_rows),'would_win':len(reason_wins),'likely_correct':len(reason_losses),
+                        'false_rejection_rate_pct':100*len(reason_wins)/len(reason_rows) if reason_rows else None,
+                        'average_net_pct':sum(getattr(a,net) for a in reason_rows)/len(reason_rows) if reason_rows else None}
             audit_stats[mode]=data
     now_utc=datetime.now(timezone.utc)
     fx=float(cfg.get('inr_per_usdt',94.75))
