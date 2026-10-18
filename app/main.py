@@ -367,7 +367,7 @@ def api_system_health(request: Request):
             if engine.dialect.name=='postgresql':
                 row=db.execute(text("SELECT pg_database_size(current_database()) AS db_bytes")).mappings().first()
                 if row: db_info['database_bytes']=int(row['db_bytes'])
-                row=db.execute(text("SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname)||'.'||quote_ident(tablename))),0) AS table_bytes FROM pg_tables WHERE schemaname='public'")).mappings().first()
+                row=db.execute(text("SELECT COALESCE(SUM(pg_total_relation_size((quote_ident(schemaname)||'.'||quote_ident(tablename))::regclass)),0) AS table_bytes FROM pg_tables WHERE schemaname='public'")).mappings().first()
                 if row: db_info['table_bytes']=int(row['table_bytes'])
             elif engine.dialect.name=='sqlite':
                 row=db.execute(text('PRAGMA page_count')).scalar() or 0
