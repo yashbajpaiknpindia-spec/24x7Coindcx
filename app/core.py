@@ -300,6 +300,8 @@ def refresh_markets(db: Session):
         excess = observation_count - 100000
         oldest_ids = select(MarketObservation.id).order_by(MarketObservation.observed_at.asc(), MarketObservation.id.asc()).limit(excess)
         db.execute(delete(MarketObservation).where(MarketObservation.id.in_(oldest_ids)))
+    # Evaluate pending counterfactuals on every market refresh, not just strategy rebalance.
+    evaluate_paper_decision_audits(db, read_config(db,'strategy_config',{}))
     runtime = read_config(db, 'runtime', {})
     runtime.update({'last_market_refresh': now.isoformat(), 'market_refresh_error': '; '.join(errors)[:1000] if errors else None, 'scan_universe_count': len(scan_universe), 'scan_universe_limit': broad_limit, 'scan_universe_pairs': scan_universe, 'scan_universe_source': 'live CoinDCX USDT tickers ranked by reported 24h volume (no price multiplier)'})
     write_config(db, 'runtime', runtime)
