@@ -281,13 +281,19 @@ def refresh_markets(db: Session):
             for k,v in values.items(): setattr(row,k,v)
         else: db.add(MarketSnapshot(product='futures', pair=pair, **values))
         updated += 1
-    # Persist each real live market refresh for future audit/research. Keep a bounded
-    # 30-day window and a hard row cap so telemetry cannot silently exhaust Postgres.
+    # Sample each pair at most once every 5 minutes. A per-minute row for every
+    # scanned pair would crowd out 24h counterfactuals on a small Postgres disk.
+    last_obs_rows=db.execute(select(MarketObservation.product,MarketObservation.pair,func.max(MarketObservation.observed_at)).group_by(MarketObservation.product,MarketObservation.pair)).all()
+    last_obs={(product,pair):(ts.replace(tzinfo=timezone.utc) if ts and ts.tzinfo is None else ts) for product,pair,ts in last_obs_rows}
     for snap in db.scalars(select(MarketSnapshot)).all():
+        previous=last_obs.get((snap.product,snap.pair))
+        if previous and (now-previous).total_seconds()<300:
+            continue
         db.add(MarketObservation(observed_at=now, product=snap.product, pair=snap.pair,
             last_price=snap.last_price, bid=snap.bid, ask=snap.ask,
             turnover_usdt=snap.quote_turnover_usdt, active=snap.active,
             source_updated_at=snap.updated_at))
+    # Retain up to 30 days, with an independent hard row cap to protect DB storage.
     db.execute(delete(MarketObservation).where(MarketObservation.observed_at < now - timedelta(days=30)))
     observation_count = db.scalar(select(func.count(MarketObservation.id))) or 0
     if observation_count > 100000:
