@@ -203,6 +203,10 @@ def paper_page(request: Request):
         p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
         stop=float(cfg.get('stop_loss_move_pct',0.75))/100
         p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for t in capital_trades:
+        opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
+        ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
+        t.held_minutes=max(0,(ended-opened).total_seconds()/60)
     for t in trades:
         opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
         ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
