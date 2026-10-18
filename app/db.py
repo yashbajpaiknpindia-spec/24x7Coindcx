@@ -238,6 +238,7 @@ class PaperDecisionAudit(Base):
     product: Mapped[str] = mapped_column(String(16), index=True)
     pair: Mapped[str] = mapped_column(String(40), index=True)
     proposed_side: Mapped[str] = mapped_column(String(8), default='none')
+    mode: Mapped[str] = mapped_column(String(24), default='unrestricted', index=True)
     decision: Mapped[str] = mapped_column(String(12), index=True)  # accepted / rejected / watch
     rejection_reason: Mapped[str] = mapped_column(String(300), default='')
     reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
