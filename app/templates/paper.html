@@ -195,12 +195,9 @@
  const esc=v=>String(v??'—');
  async function poll(){try{
   const res=await fetch('/api/paper-rejection-audit',{cache:'no-store'});if(!res.ok)return;
-  const d=await res.json(),rows=d.decisions||[];
-  const rejected=rows.filter(x=>x.decision==='rejected'), research=rejected.filter(x=>x.mode==='unrestricted'), capital=rejected.filter(x=>x.mode==='capital_constrained');
-  const eval1=rejected.filter(x=>x.evaluated_1h&&x.net_outcome_1h_pct!==null&&x.net_outcome_1h_pct!==undefined);
-  set('audit-research-rejected',research.length);set('audit-capital-rejected',capital.length);
-  set('audit-would-win-1h',eval1.filter(x=>x.net_outcome_1h_pct>0).length);
-  set('audit-correct-1h',eval1.filter(x=>x.net_outcome_1h_pct<=0).length);
+  const d=await res.json(),rows=d.decisions||[],summary=d.summary||{};
+  set('audit-research-rejected',summary.unrestricted_rejected??0);set('audit-capital-rejected',summary.capital_constrained_rejected??0);
+  set('audit-would-win-1h',summary.rejected_would_win_1h??0);set('audit-correct-1h',summary.rejected_correct_1h??0);
   body.replaceChildren();
   for(const a of rows.slice(0,100)){
    const tr=document.createElement('tr');
