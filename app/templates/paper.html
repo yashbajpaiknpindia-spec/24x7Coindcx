@@ -101,7 +101,7 @@
    const hist=r.candle_ready?'<span class="status-chip green">READY</span>':'<span class="status-chip muted-chip">NOT SCORED</span>';
    const gateTitle=esc(r.eligibility_reason||'No eligibility detail');
    const signalTitle=esc(r.signal_reason||'No strategy detail');
-   const stateClass=r.paper_state==='OPEN PAPER POSITION'?'green':r.paper_state==='BLOCKED BY LIQUIDITY GATE'?'red':'muted-chip';
+   const stateClass=r.paper_state==='OPEN PAPER POSITION'?'green':String(r.paper_state||'').startsWith('BLOCKED')?'red':'muted-chip';
    const age=r.snapshot_age_seconds===null||r.snapshot_age_seconds===undefined?'—':num(r.snapshot_age_seconds,0)+'s old';
    let html='<tr><td class="mono">'+esc(r.rank)+'</td><td><b>'+esc(r.pair)+'</b><div class="muted">'+esc(age)+'</div></td><td>'+esc(String(r.product||'').toUpperCase())+'</td>';
    html+='<td class="mono">'+esc(price(r.last_price))+'</td><td class="mono" title="'+esc(r.liquidity_source||'Turnover source unavailable')+'">'+esc(compact(r.turnover_usdt_proxy))+'</td>';
