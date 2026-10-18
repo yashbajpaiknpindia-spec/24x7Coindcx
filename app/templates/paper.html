@@ -40,7 +40,7 @@
  </div><input id="scan-search" class="scan-search" type="search" placeholder="Filter by coin or pair…" aria-label="Filter scanned markets"></div>
  <div class="panel-note" id="scan-results-meta">Waiting for the first successful live CoinDCX market refresh…</div>
  <div class="panel-note" id="scan-results-error" hidden></div>
- <div class="table-wrap scan-table-wrap"><table id="paper-scan-table"><thead><tr><th>Rank</th><th>Pair</th><th>Product</th><th>Last price</th><th>24h turnover proxy</th><th>Spread</th><th>History</th><th>Strategy score / momentum</th><th>Signal</th><th>Liquidity gate</th><th>Paper status</th></tr></thead><tbody id="paper-scan-rows"><tr><td colspan="11" class="empty">No live scan results fetched yet. The table will show why if the API or worker is unavailable.</td></tr></tbody></table></div>
+ <div class="table-wrap scan-table-wrap"><table id="paper-scan-table"><thead><tr><th>Rank</th><th>Pair</th><th>Product</th><th>Last price</th><th>24h turnover proxy</th><th>Spread</th><th>History</th><th>Strategy score / momentum</th><th>Expected move / cost hurdle</th><th>Signal</th><th>Liquidity gate</th><th>Paper status</th></tr></thead><tbody id="paper-scan-rows"><tr><td colspan="12" class="empty">No live scan results fetched yet. The table will show why if the API or worker is unavailable.</td></tr></tbody></table></div>
  <div class="panel-note">Signals come from the last completed candle-scoring cycle. Prices and liquidity gates come from the latest market refresh. Check timestamps before interpreting an opportunity.</div>
 </section>
 
@@ -97,6 +97,7 @@
    const signalClass=r.signal==='LONG'?'green':r.signal==='SHORT'?'red':'muted-chip';
    const gateClass=r.eligible?'green':'muted-chip';
    const score=r.strategy_score===null||r.strategy_score===undefined?'—':num(r.strategy_score,3)+' / '+(r.momentum_pct===null||r.momentum_pct===undefined?'—':(Number(r.momentum_pct)>0?'+':'')+num(r.momentum_pct,2)+'%');
+   const moveCost=(r.expected_move_pct===null||r.expected_move_pct===undefined?'—':num(r.expected_move_pct,2)+'% / cost '+(r.estimated_round_trip_cost_pct===null||r.estimated_round_trip_cost_pct===undefined?'—':num(r.estimated_round_trip_cost_pct,2)+'%'));
    const hist=r.candle_ready?'<span class="status-chip green">READY</span>':'<span class="status-chip muted-chip">NOT SCORED</span>';
    const gateTitle=esc(r.eligibility_reason||'No eligibility detail');
    const signalTitle=esc(r.signal_reason||'No strategy detail');
@@ -105,7 +106,7 @@
    let html='<tr><td class="mono">'+esc(r.rank)+'</td><td><b>'+esc(r.pair)+'</b><div class="muted">'+esc(age)+'</div></td><td>'+esc(String(r.product||'').toUpperCase())+'</td>';
    html+='<td class="mono">'+esc(price(r.last_price))+'</td><td class="mono" title="'+esc(r.liquidity_source||'Turnover source unavailable')+'">'+esc(compact(r.turnover_usdt_proxy))+'</td>';
    html+='<td class="mono">'+(r.spread_bps===null||r.spread_bps===undefined?'—':esc(num(r.spread_bps,1)+' bps'))+'</td><td>'+hist+'</td>';
-   html+='<td class="mono" title="'+signalTitle+'">'+esc(score)+'</td><td><span class="status-chip '+signalClass+'">'+esc(r.signal||'NO SCORE')+'</span></td>';
+   html+='<td class="mono" title="'+signalTitle+'">'+esc(score)+'</td><td class="mono">'+esc(moveCost)+'</td><td><span class="status-chip '+signalClass+'">'+esc(r.signal||'NO SCORE')+'</span></td>';
    html+='<td><span class="status-chip '+gateClass+'" title="'+gateTitle+'">'+(r.eligible?'PASS':'BLOCKED')+'</span><div class="muted scan-reason">'+gateTitle+'</div></td>';
    html+='<td><span class="status-chip '+stateClass+'">'+esc(r.paper_state||'UNKNOWN')+'</span>';
    if(r.paper_unrealized_pnl_inr!==null&&r.paper_unrealized_pnl_inr!==undefined)html+='<div class="muted">uPnL ₹'+esc(num(r.paper_unrealized_pnl_inr))+'</div>';
