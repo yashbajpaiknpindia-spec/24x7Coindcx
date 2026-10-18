@@ -24,7 +24,7 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.4.1', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.4.3', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
@@ -54,7 +54,7 @@ def health():
     try:
         with SessionLocal() as db:
             db.execute(select(ConfigKV.key).limit(1)).all()
-        return {'ok': True, 'service': APP_NAME, 'version': '1.4.1', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
+        return {'ok': True, 'service': APP_NAME, 'version': '1.4.3', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
     except Exception as exc:
         return JSONResponse({'ok': False, 'error': str(exc)[:200]}, status_code=503)
 
@@ -236,6 +236,129 @@ def api_paper_status(request: Request):
             'paper_cycle_attempted_at':runtime.get('paper_cycle_attempted_at'),'paper_last_cycle':cfg.get('paper_last_cycle'),
             'last_strategy_cycle':cycle,'candle_diagnostics':diag,'open_positions':db.scalar(select(func.count(PaperPosition.id)).where(PaperPosition.is_open==True)) or 0,
             'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0}
+
+
+
+@app.get('/api/paper-scan-results')
+def api_paper_scan_results(request: Request):
+    """Authenticated, read-only view of live market scans and the last real strategy score run."""
+    if not authed(request):
+        return JSONResponse({'error':'login_required','message':'Your session expired. Sign in again to view live scan results.'}, status_code=401)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        runtime=read_config(db,'runtime',{})
+        discovered=runtime.get('scan_universe_pairs') or cfg.get('pair_universe') or PAIR_UNIVERSE
+        pairs=list(dict.fromkeys(str(p) for p in discovered if p))
+        requested_limit=max(20,min(150,env_int('SCAN_UNIVERSE_LIMIT',60)))
+        pairs=pairs[:requested_limit]
+        if not pairs: pairs=PAIR_UNIVERSE[:requested_limit]
+        product_mode=cfg.get('product_mode','both')
+        products=['spot','futures'] if product_mode=='both' else ([product_mode] if product_mode in ('spot','futures') else ['spot','futures'])
+        snapshots=db.scalars(select(MarketSnapshot).where(MarketSnapshot.pair.in_(pairs))).all() if pairs else []
+        by_market={(m.product,m.pair):m for m in snapshots}
+        spot_turnover={m.pair:float(m.quote_turnover_usdt or 0) for m in snapshots if m.product=='spot'}
+        pair_order=sorted(pairs,key=lambda pair:spot_turnover.get(pair,0),reverse=True)
+        market_rank={pair:i+1 for i,pair in enumerate(pair_order)}
+        strategy_scan=runtime.get('paper_strategy_scan') or {}
+        products_scan=strategy_scan.get('products') or {}
+        score_by_market={}
+        for product, values in products_scan.items():
+            for item in values or []:
+                if isinstance(item,dict) and item.get('pair'):
+                    score_by_market[(product,item['pair'])]=item
+        open_positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True)).all()
+        open_map={(p.product,p.pair):p for p in open_positions}
+        recent_trades=db.scalars(select(Trade).where(Trade.run_mode=='paper').order_by(desc(Trade.created_at)).limit(400)).all()
+        trade_map={}
+        for trade in recent_trades:
+            trade_map.setdefault((trade.product,trade.pair),trade)
+        now=datetime.now(timezone.utc)
+        rows=[]
+        for pair in pair_order:
+            for product in products:
+                snap=by_market.get((product,pair))
+                scored=score_by_market.get((product,pair),{})
+                spread=market_spread_bps(snap.bid,snap.ask) if snap else None
+                updated=snap.updated_at if snap else None
+                if updated is not None:
+                    updated=updated.replace(tzinfo=timezone.utc) if updated.tzinfo is None else updated.astimezone(timezone.utc)
+                    age=max(0,int((now-updated).total_seconds()))
+                else: age=None
+                if snap:
+                    eligible, eligibility_reason=market_eligibility(snap,cfg)
+                else:
+                    eligible, eligibility_reason=False,'No market snapshot yet; waiting for a live scanner refresh'
+                position=open_map.get((product,pair))
+                trade=trade_map.get((product,pair))
+                if position:
+                    paper_state='OPEN PAPER POSITION'
+                elif trade and trade.status=='closed':
+                    paper_state='LAST TRADE CLOSED'
+                elif scored.get('signal') in ('LONG','SHORT'):
+                    paper_state='ELIGIBLE CANDIDATE' if eligible else 'BLOCKED BY LIQUIDITY GATE'
+                elif scored:
+                    paper_state='WATCH / NO ENTRY'
+                else:
+                    paper_state='WAITING FOR CANDLES'
+                rows.append({
+                    'rank':market_rank[pair], 'pair':pair, 'product':product,
+                    'last_price':snap.last_price if snap else None,
+                    'turnover_usdt_proxy':snap.quote_turnover_usdt if snap else None,
+                    'liquidity_source':snap.liquidity_source if snap else 'not available',
+                    'bid':snap.bid if snap else None, 'ask':snap.ask if snap else None,
+                    'spread_bps':spread, 'active':bool(snap.active) if snap else False,
+                    'exit_only':bool(snap.exit_only) if snap else False,
+                    'snapshot_age_seconds':age, 'updated_at':updated.isoformat() if updated else None,
+                    'eligible':bool(eligible), 'eligibility_reason':eligibility_reason,
+                    'candle_ready':bool(scored), 'strategy_score':scored.get('score'),
+                    'momentum_pct':scored.get('momentum_pct'),
+                    'hourly_volatility_pct':scored.get('hourly_volatility_pct'),
+                    'strategy_turnover_proxy':scored.get('turnover_proxy'),
+                    'strategy_rank':scored.get('strategy_rank'),
+                    'liquid_shortlist':bool(scored.get('liquid_shortlist',False)),
+                    'signal':scored.get('signal','NO SCORE'),
+                    'signal_reason':scored.get('signal_reason','Strategy has not produced a score for this market yet'),
+                    'paper_state':paper_state,
+                    'paper_unrealized_pnl_inr':float(position.last_unrealized_pnl_inr or 0) if position else None,
+                    'last_trade_status':trade.status if trade else None,
+                    'last_trade_net_pnl_inr':float(trade.net_pnl_inr or 0) if trade else None,
+                    'leverage':float(position.leverage or 1) if position else float(cfg.get('futures_leverage',1) or 1),
+                })
+        unique_eligible=sum(1 for pair in pairs if any(r['pair']==pair and r['eligible'] for r in rows))
+        opportunity_rows=[r for r in rows if r['signal'] in ('LONG','SHORT')]
+        eligible_opportunities=[r for r in opportunity_rows if r['eligible']]
+        diag=runtime.get('paper_candle_diagnostics') or {}
+        heartbeat=runtime.get('worker_last_heartbeat')
+        try:
+            hb=datetime.fromisoformat(str(heartbeat).replace('Z','+00:00')) if heartbeat else None
+            if hb and hb.tzinfo is None: hb=hb.replace(tzinfo=timezone.utc)
+            heartbeat_age=int(max(0,(now-hb).total_seconds())) if hb else None
+        except Exception: heartbeat_age=None
+        return {
+            'ok':True,'as_of':now.isoformat(),'universe_count':len(pairs),
+            'scan_universe_limit':runtime.get('scan_universe_limit',requested_limit),
+            'scan_universe_source':runtime.get('scan_universe_source','Waiting for first successful CoinDCX scan'),
+            'last_market_refresh':runtime.get('last_market_refresh'),
+            'market_refresh_error':runtime.get('market_refresh_error'),
+            'worker_last_heartbeat':heartbeat,'worker_heartbeat_age_seconds':heartbeat_age,
+            'paper_cycle_status':runtime.get('paper_cycle_status','waiting'),
+            'paper_cycle_message':runtime.get('paper_cycle_message','Paper cycle has not reported a result yet'),
+            'paper_cycle_attempted_at':runtime.get('paper_cycle_attempted_at'),
+            'strategy_as_of':strategy_scan.get('as_of'),
+            'strategy_id':strategy_scan.get('strategy_id'),
+            'candle_diagnostics':diag,
+            'summary':{'unique_markets':len(pairs),'product_checks':len(rows),
+                       'snapshots_present':sum(1 for r in rows if r['last_price'] is not None and r['last_price']>0),
+                       'snapshot_records_updated':sum(1 for r in rows if r['updated_at']),
+                       'liquidity_gate_passes':sum(1 for r in rows if r['eligible']),
+                       'unique_markets_with_any_pass':unique_eligible,
+                       'candle_ready_records':sum(1 for r in rows if r['candle_ready']),
+                       'strategy_opportunities':len(opportunity_rows),
+                       'eligible_opportunities':len(eligible_opportunities),
+                       'open_paper_positions':len(open_positions),
+                       'closed_paper_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0},
+            'rows':rows,
+        }
 
 
 @app.post('/paper/pause')
