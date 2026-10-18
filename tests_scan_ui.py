@@ -57,7 +57,7 @@ def run():
             assert sum(1 for x in rows if x.product == "futures" and x.last_price is not None) == 60
             spot_by_pair = {x.pair: x for x in rows if x.product == "spot"}
             fut_by_pair = {x.pair: x for x in rows if x.product == "futures"}
-            # The higher price on COIN079 must not overpower its lower reported
+            # The higher price on COIN059 must not overpower its lower reported
             # 24h ticker volume; no second multiplication by last price is valid.
             assert spot_by_pair["B-COIN059_USDT"].last_price == 60
             assert spot_by_pair["B-COIN059_USDT"].quote_turnover_usdt == 999_941
