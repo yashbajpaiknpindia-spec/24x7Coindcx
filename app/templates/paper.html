@@ -58,21 +58,7 @@
 <div class="panel-head"><div><div class="eyebrow">MODE B · CONSTRAINED LEDGER</div><h3>Recent capital-constrained trades</h3></div></div><div class="table-wrap"><table><thead><tr><th>Opened</th><th>Closed</th><th>Pair</th><th>Side</th><th>Notional</th><th>Held</th><th>Exit reason</th><th>Costs</th><th>Net P&amp;L</th><th>Status</th></tr></thead><tbody>{% for t in capital_trades %}<tr><td class="mono">{{t.created_at.strftime('%m-%d %H:%M') if t.created_at else '—'}}</td><td class="mono">{{t.closed_at.strftime('%m-%d %H:%M') if t.closed_at else '—'}}</td><td><b>{{t.pair}}</b></td><td>{{t.side|upper}}</td><td class="mono">USDT {{'{:,.2f}'.format(abs(t.quantity*t.entry_price))}}</td><td class="mono">{{'%.1f min'|format(t.held_minutes) if t.held_minutes<60 else ('%.2f hr'|format(t.held_minutes/60))}}</td><td>{{t.reason or '—'}}</td><td class="mono">₹{{'{:,.2f}'.format((t.fees_inr or 0)+(t.slippage_inr or 0)+(t.funding_inr or 0))}}</td><td class="mono {{'positive' if t.net_pnl_inr>=0 else 'negative'}}">₹{{'{:,.2f}'.format(t.net_pnl_inr)}}</td><td>{{t.status|upper}}</td></tr>{% endfor %}{% if not capital_trades %}<tr><td colspan="10" class="empty">No constrained trades recorded yet.</td></tr>{% endif %}</tbody></table></div></section>
 <section class="panel" id="system-resource-panel"><div class="panel-head"><div><div class="eyebrow">OPERATIONS / CAPACITY</div><h3>Web memory & database storage</h3></div><span id="sys-health-status" class="status-chip muted-chip">LOADING</span></div><div class="stat-grid four"><div class="stat-card"><div class="stat-top"><span>Web process RSS</span></div><div class="stat-value" id="sys-memory">—</div><div class="stat-foot" id="sys-memory-foot">Limit 512 MiB · process-level reading</div></div><div class="stat-card"><div class="stat-top"><span>Memory remaining</span></div><div class="stat-value" id="sys-memory-free">—</div><div class="stat-foot" id="sys-memory-pct">Waiting for telemetry</div></div><div class="stat-card"><div class="stat-top"><span>Database size</span></div><div class="stat-value" id="sys-db-size">—</div><div class="stat-foot" id="sys-db-tables">Database / table footprint</div></div><div class="stat-card"><div class="stat-top"><span>Estimated DB space left</span></div><div class="stat-value" id="sys-db-free">—</div><div class="stat-foot" id="sys-db-foot">Configured disk minus database size</div></div></div><div class="connection-details"><div><span>Market history rows</span><b id="sys-history-rows">{{observation_count}}</b></div><div><span>Market snapshots</span><b id="sys-market-rows">—</b></div><div><span>Stored trades / events</span><b id="sys-trades-events">—</b></div><div><span>History retention</span><b>30 days / 100,000 rows</b></div></div><div class="panel-note" id="sys-health-note">Live price/bid/ask/turnover history is retained for research. Closed trades and ledger rows are preserved.</div></section>
 
-(async function systemHealthLoop(){
- const fmtBytes=n=>n===null||n===undefined?'—':(n/1024/1024>=1024?(n/1024/1024/1024).toFixed(2)+' GB':(n/1024/1024).toFixed(1)+' MB');
- const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
- async function poll(){try{const res=await fetch('/api/system-health',{cache:'no-store'});if(!res.ok)return;const d=await res.json(),db=d.database||{};
- set('sys-memory',fmtBytes(d.process_memory_rss_bytes)+' / '+fmtBytes(d.memory_limit_bytes));
- set('sys-memory-foot','Web process RSS · configured '+Math.round((d.memory_limit_bytes||0)/1024/1024)+' MiB ceiling');
- set('sys-memory-free',fmtBytes(d.memory_remaining_bytes));set('sys-memory-pct',d.memory_used_pct===null?'RSS unavailable':d.memory_used_pct+'% of configured ceiling');
- set('sys-db-size',fmtBytes(db.database_bytes));set('sys-db-tables','Tables/indexes '+fmtBytes(db.table_bytes));
- set('sys-db-free',fmtBytes(db.estimated_disk_remaining_bytes));set('sys-db-foot','Configured disk '+fmtBytes(db.allocated_disk_bytes)+' · estimate');
- set('sys-history-rows',Number(db.observation_rows||0).toLocaleString());set('sys-market-rows',Number(db.market_snapshot_rows||0).toLocaleString());
- set('sys-trades-events',Number(db.trade_rows||0).toLocaleString()+' / '+Number(db.event_rows||0).toLocaleString());
- set('sys-health-note',db.error?'Database telemetry warning: '+db.error:(d.note||'Operational telemetry updated.'));
- set('sys-health-status','UPDATED');const chip=document.getElementById('sys-health-status');if(chip)chip.className='status-chip '+((d.memory_used_pct||0)>80?'red':'green');
- }catch(e){set('sys-health-status','UNAVAILABLE')}}await poll();window.setInterval(poll,15000);
-})();
+
 {% endblock %}
 {% block scripts %}
 <script>
@@ -174,6 +160,21 @@
  await poll();window.setInterval(poll,10000);
 })();
 
+(async function systemHealthLoop(){
+ const fmtBytes=n=>n===null||n===undefined?'—':(n/1024/1024>=1024?(n/1024/1024/1024).toFixed(2)+' GB':(n/1024/1024).toFixed(1)+' MB');
+ const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
+ async function poll(){try{const res=await fetch('/api/system-health',{cache:'no-store'});if(!res.ok)return;const d=await res.json(),db=d.database||{};
+ set('sys-memory',fmtBytes(d.process_memory_rss_bytes)+' / '+fmtBytes(d.memory_limit_bytes));
+ set('sys-memory-foot','Web process RSS · configured '+Math.round((d.memory_limit_bytes||0)/1024/1024)+' MiB ceiling');
+ set('sys-memory-free',fmtBytes(d.memory_remaining_bytes));set('sys-memory-pct',d.memory_used_pct===null?'RSS unavailable':d.memory_used_pct+'% of configured ceiling');
+ set('sys-db-size',fmtBytes(db.database_bytes));set('sys-db-tables','Tables/indexes '+fmtBytes(db.table_bytes));
+ set('sys-db-free',fmtBytes(db.estimated_disk_remaining_bytes));set('sys-db-foot','Configured disk '+fmtBytes(db.allocated_disk_bytes)+' · estimate');
+ set('sys-history-rows',Number(db.observation_rows||0).toLocaleString());set('sys-market-rows',Number(db.market_snapshot_rows||0).toLocaleString());
+ set('sys-trades-events',Number(db.trade_rows||0).toLocaleString()+' / '+Number(db.event_rows||0).toLocaleString());
+ set('sys-health-note',db.error?'Database telemetry warning: '+db.error:(d.note||'Operational telemetry updated.'));
+ set('sys-health-status','UPDATED');const chip=document.getElementById('sys-health-status');if(chip)chip.className='status-chip '+((d.memory_used_pct||0)>80?'red':'green');
+ }catch(e){set('sys-health-status','UNAVAILABLE')}}await poll();window.setInterval(poll,15000);
+})();
 </script>
 
 <style>
