@@ -812,6 +812,13 @@ def run_paper_cycle(db: Session, force: bool = False):
         available=max(0.0,capital_inr-reserved_margin_inr)
         allocation=min(available,capital_inr*allocation_pct/100.0)
         if allocation <= 1.0:
+            reason=f'insufficient available capital/margin: ₹{available:.2f} available; required allocation is above ₹1.00'
+            db.add(PaperDecisionAudit(decision_at=utcnow(),product=product,pair=item['pair'],proposed_side=side,
+                mode='capital_constrained',decision='rejected',rejection_reason=reason,
+                reference_price=float(snap.ask if side=='buy' else snap.bid) if (snap.ask if side=='buy' else snap.bid) else snap.last_price,
+                entry_bid=snap.bid,entry_ask=snap.ask,expected_move_pct=expected,estimated_cost_pct=hurdle,
+                score=float(item.get('score') or 0),momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+                momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
             log_event(db,f'Skipped capital-constrained entry {product} {item["pair"]}: insufficient unreserved paper capital.', 'INFO','capital_gate',{'available_margin_inr':available})
             continue
         effective_lev=max(1.0,float(lev if product=='futures' else 1.0))
@@ -833,6 +840,11 @@ def run_paper_cycle(db: Session, force: bool = False):
                 'allocation_pct':allocation_pct,'score':item.get('score'),'momentum_24h_pct':item.get('momentum_24h_pct'),
                 'momentum_72h_pct':item.get('momentum_72h_pct'),'expected_move_pct':expected,
                 'estimated_round_trip_cost_pct':hurdle,'entry_bid':snap.bid,'entry_ask':snap.ask}))
+        db.add(PaperDecisionAudit(decision_at=utcnow(),product=product,pair=item['pair'],proposed_side=side,
+            mode='capital_constrained',decision='accepted',rejection_reason='',reference_price=price,
+            entry_bid=snap.bid,entry_ask=snap.ask,expected_move_pct=expected,estimated_cost_pct=hurdle,
+            score=float(item.get('score') or 0),momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+            momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
         db.add(trade); db.flush()
         db.add(PaperModePosition(mode='capital_constrained',product=product,pair=item['pair'],side=side,quantity=qty,
             entry_price=price,notional_usdt=notional,leverage=effective_lev,opened_at=utcnow(),strategy=STRATEGY_ID,
