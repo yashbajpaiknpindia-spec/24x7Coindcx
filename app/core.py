@@ -637,8 +637,8 @@ def record_paper_decision_audits(db: Session, products: dict, viable: list, cfg:
         reason=''
         decision='accepted' if key in accepted else 'rejected'
         snap=snap_map.get((product,item['pair']))
-        hurdle=None
         expected=float(item.get('expected_move_pct') or 0)
+        hurdle=_entry_cost_hurdle_pct(product,cfg,snap) if snap else None
         ref_price=None
         if snap:
             ref_price=(snap.ask if side=='buy' else snap.bid) or snap.last_price
@@ -651,7 +651,6 @@ def record_paper_decision_audits(db: Session, products: dict, viable: list, cfg:
             if not ok:
                 reason='market/liquidity gate: '+why
             else:
-                hurdle=_entry_cost_hurdle_pct(product,cfg,snap)
                 minimum=max(float(cfg.get('min_expected_move_pct',0.75)),
                     (hurdle or 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
                 if hurdle is None or expected < minimum:
