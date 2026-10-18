@@ -46,7 +46,7 @@ A Render-ready research and trading operations dashboard for the user's CoinDCX 
 
 ## Strategy identifier
 
-`CSM14D_VOL14D_LIQ7D_DAILY` — dynamic discovered USDT candidates plus the 14-pair seed watchlist; 14-day price momentum divided by 14-day hourly return volatility; prior 7-day close-times-volume turnover proxy used for the top-eight liquidity shortlist; once-per-UTC-day rebalance. Futures select up to three long leaders and three short laggards. Cash spot is long-only and selects up to three positive-score leaders. This is a practical app-side reproduction of the current research description, not proof it matches every historical notebook implementation. Historical variant discrepancies must be reconciled before treating results as reproducible.
+`CSM14D_VOL14D_LIQ7D_DAILY` — up to 60 dynamically discovered USDT candidates by default (configurable up to 150; seed pairs are fallback only); 14-day price momentum divided by 14-day hourly return volatility; prior 7-day close-times-volume turnover proxy used for the top-eight liquidity shortlist; once-per-UTC-day rebalance. Futures select up to three long leaders and three short laggards. Cash spot is long-only and selects up to three positive-score leaders. This is a practical app-side reproduction of the current research description, not proof it matches every historical notebook implementation. Historical variant discrepancies must be reconciled before treating results as reproducible.
 
 ## UI pages
 
