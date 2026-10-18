@@ -1,8 +1,15 @@
-# CoinDCX Strategy Terminal (v1.4.3)
+# CoinDCX Strategy Terminal (v1.4.4)
+
+## Reported ticker-volume correction (v1.4.4)
+
+- The live API emitted BTC spot 24h `volume` around 721 million with a last price around 81,000. Multiplying these values generated a fictitious turnover around 58 trillion. The scanner now preserves the exchange-reported 24h volume value for the USDT-quoted spot/futures ticker as its turnover proxy; it does not multiply ticker volume by last price again.
+- The universe is ranked by the reported 24h volume on the USDT pair, not by volume × price and not by market capitalization. This is still a screening proxy; always check order-book spread/depth and current freshness before treating a pair as executable.
+- Candle-derived strategy turnover is distinct: hourly candle volumes represent traded quantity and are still multiplied by candle close for the historical turnover proxy.
+- The liquidity gate compares the ticker-reported proxy against the configured threshold. CoinDCX field semantics can change; the UI calls this a proxy rather than a guaranteed fill or verified profitability metric.
 
 ## Live scan / response parsing / UI fix (v1.4.3)
 
-- The exchange-discovered market universe is ranked by the reported spot ticker base volume × last price and capped at 60 unique USDT pairs by default (configurable up to 150). It is not a market-cap ranking; liquidity and turnover are screening proxies.
+- The exchange-discovered market universe is ranked by reported 24h ticker volume and capped at 60 unique USDT pairs by default (configurable up to 150). It is not a market-cap ranking; liquidity and turnover are screening proxies.
 - Spot ticker symbols are normalized from the concatenated CoinDCX format (for example, `BTCUSDT`) to the canonical app pair (for example, `B-BTC_USDT`) using market-details metadata where available.
 - Futures current prices now unwrap the documented `prices` map, and futures candles unwrap the `{s, data}` response.
 - Candle scoring uses the same discovered, capped universe that the scan UI displays. It refreshes opportunities every 15 minutes while portfolio rebalancing remains daily.
@@ -32,14 +39,14 @@ A Render-ready research and trading operations dashboard for the user's CoinDCX 
 - **Live mode:** the UI supports manually submitted, explicitly confirmed spot/futures orders. It is disabled by default with `LIVE_TRADING_ENABLED=false`, requires API credentials in Render environment variables, a successful account check, an explicit `ARM LIVE TRADING` phrase, and a second `SUBMIT LIVE ORDER` phrase on each order. App-level caps default to $25 USDT per order, 2x maximum futures leverage, and $100 USDT rolling 24-hour order notional. A web-service restart disarms live mode.
 - **Automated live strategy trading is implemented behind explicit deployment gates and typed UI arming, but is disabled by default.** The worker only runs a daily UTC rebalance when both `LIVE_TRADING_ENABLED=true` and `AUTO_LIVE_TRADING_ENABLED=true` are set for both web and worker, credentials are present, reconciliation is clean, and an administrator arms it in the UI. Worker/web restarts disarm it. This is not a guarantee of profitability.
 - Reconciliation imports spot account trade history, app-order-linked futures trade history, and futures transaction rows with exchange-reported P&L/fees/funding where returned. Entries are idempotent and unknown orders block automation. The account-wide futures trade sync uses a configurable rolling lookback (default 3 days), not a lifetime archive. API pagination ceilings, incomplete order history, and field/venue limitations are surfaced as warnings. This cannot guarantee complete accounting of external orders; verify discrepancies against CoinDCX before trading.
-- The liquid-market gate fails closed when the app lacks a fresh snapshot, best bid/ask, turnover proxy, active status, or acceptable spread. The turnover estimate is `reported base volume × last price`; it is a screening proxy, not a verified exchange-wide quote turnover or an order-book-depth guarantee. Do not assume it guarantees fillability.
+- The liquid-market gate fails closed when the app lacks a fresh snapshot, best bid/ask, turnover proxy, active status, or acceptable spread. The ticker-reported 24h volume is used directly as a turnover proxy for the USDT pair, without multiplying by last price again. It is not a verified guarantee of fillability or complete order-book depth. Do not assume it guarantees fillability.
 - Paper-trading P&L and fees/slippage/funding are modelled estimates, not actual account results. Stress funding is hypothetical. Paper futures liquidation/maintenance-margin simulation is not exchange-exact.
 - Seeded backtest rows are snapshots of previous results supplied during research. They are not recomputed by this application, cannot be merged across differing strategy versions, and aren't a genuine blind test. The newest run's 3x return (+828.85%) differed from a previous variant (+451.72%); both are labelled as separate snapshots.
 - API names/fields can change; test on a separate API key with the minimum required permissions first. Never put API secrets into source files, Colab output, chat, the database, or Git.
 
 ## Strategy identifier
 
-`CSM14D_VOL14D_LIQ7D_DAILY` — dynamic discovered USDT candidates plus the 14-pair seed watchlist; 14-day price momentum divided by 14-day hourly return volatility; prior 7-day close-times-volume turnover proxy used for the top-eight liquidity shortlist; once-per-UTC-day rebalance. Futures select up to three long leaders and three short laggards. Cash spot is long-only and selects up to three positive-score leaders. This is a practical app-side reproduction of the current research description, not proof it matches every historical notebook implementation. Historical variant discrepancies must be reconciled before treating results as reproducible.
+`CSM14D_VOL14D_LIQ7D_DAILY` — up to 60 dynamically discovered USDT candidates by default (configurable up to 150; seed pairs are fallback only); 14-day price momentum divided by 14-day hourly return volatility; prior 7-day close-times-volume turnover proxy used for the top-eight liquidity shortlist; once-per-UTC-day rebalance. Futures select up to three long leaders and three short laggards. Cash spot is long-only and selects up to three positive-score leaders. This is a practical app-side reproduction of the current research description, not proof it matches every historical notebook implementation. Historical variant discrepancies must be reconciled before treating results as reproducible.
 
 ## UI pages
 

@@ -17,10 +17,24 @@ def run():
     due, req = paper_cycle_due({'paper_last_cycle':today_cycle,'paper_cycle_requested_at':now.isoformat()},
         {'paper_request_handled_at':None,'paper_cycle_attempted_at':today_cycle}, now)
     assert due and req == now.isoformat(), (due, req)
-    # When a same-day request was already handled, no needless duplicate cycle fires.
+    # When a same-day request was already handled and the universe is unchanged,
+    # no needless duplicate cycle fires.
+    same_runtime={'paper_request_handled_at':now.isoformat(),'paper_cycle_attempted_at':today_cycle,
+                  'scan_universe_count':14,'last_strategy_cycle':{'scan_universe_count':14}}
     due, req = paper_cycle_due({'paper_last_cycle':today_cycle,'paper_cycle_requested_at':now.isoformat()},
-        {'paper_request_handled_at':now.isoformat(),'paper_cycle_attempted_at':today_cycle}, now)
+        same_runtime, now)
     assert not due and req is None, (due, req)
+    # If the scan expands beyond the universe used by today's older rebalance,
+    # run one paper-only cycle immediately instead of waiting until tomorrow.
+    expanded_cfg={'paper_last_cycle':today_cycle}
+    expanded_runtime={'paper_cycle_attempted_at':today_cycle,'scan_universe_count':60,
+                      'last_strategy_cycle':{'scan_universe_count':14}}
+    due, req=paper_cycle_due(expanded_cfg,expanded_runtime,now)
+    assert due and req is None, (due,req)
+    # Once a cycle has run against the new universe, no second same-day rebalance fires.
+    expanded_runtime['last_strategy_cycle']={'scan_universe_count':60}
+    due, req=paper_cycle_due(expanded_cfg,expanded_runtime,now)
+    assert not due and req is None, (due,req)
     # If no cycle ran today, a stale attempt is retried after cooldown.
     yesterday=(now-timedelta(days=1)).isoformat()
     stale_attempt=(now-timedelta(minutes=20)).isoformat()

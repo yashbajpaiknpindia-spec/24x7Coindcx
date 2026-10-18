@@ -15,7 +15,7 @@ class FixtureCoinDCX:
     def spot_tickers(self):
         return [
             {"market": p.removeprefix("B-").replace("_", ""),
-             "last_price": "1", "volume": str(1_000_000-i)}
+             "last_price": str(i+1), "volume": str(1_000_000-i)}
             for i, p in enumerate(self.pairs)
         ]
     def spot_market_details(self):
@@ -26,7 +26,7 @@ class FixtureCoinDCX:
             for p in self.pairs
         ]
     def futures_prices(self):
-        return [{"mkt": p, "ls": "1", "v": str(1_000_000-i)}
+        return [{"mkt": p, "ls": str(i+1), "v": str(1_000_000-i)}
                 for i, p in enumerate(self.pairs)]
     def futures_active_instruments(self, margin="USDT"):
         return list(self.pairs)
@@ -53,9 +53,17 @@ def run():
             assert len(set(pairs)) == 60
             rows = db.query(MarketSnapshot).all()
             assert len(rows) == 120, len(rows)
-            assert sum(1 for x in rows if x.product == "spot" and x.last_price == 1) == 60
-            assert sum(1 for x in rows if x.product == "futures" and x.last_price == 1) == 60
-            print("PASS: concatenated spot symbols map to canonical markets and the scanner persists 60 unique pairs for both products.")
+            assert sum(1 for x in rows if x.product == "spot" and x.last_price is not None) == 60
+            assert sum(1 for x in rows if x.product == "futures" and x.last_price is not None) == 60
+            spot_by_pair = {x.pair: x for x in rows if x.product == "spot"}
+            fut_by_pair = {x.pair: x for x in rows if x.product == "futures"}
+            # The higher price on COIN079 must not overpower its lower reported
+            # 24h ticker volume; no second multiplication by last price is valid.
+            assert spot_by_pair["B-COIN059_USDT"].last_price == 60
+            assert spot_by_pair["B-COIN059_USDT"].quote_turnover_usdt == 999_941
+            assert fut_by_pair["B-COIN059_USDT"].last_price == 60
+            assert fut_by_pair["B-COIN059_USDT"].quote_turnover_usdt == 999_941
+            print("PASS: concatenated symbols normalize, the 60-market cap persists, and ticker volume remains unmultiplied by last price.")
     finally:
         core.CoinDCXClient = old_client
         if old_limit is None:

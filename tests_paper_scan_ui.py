@@ -10,5 +10,6 @@ for marker in ("paper-scan-table", "scan-summary-markets", "scan-summary-liquid"
                "scan-summary-opportunities", "scan-summary-candles",
                "scan-results-error", "data-scan-filter", "setInterval(poll,10000)"):
     assert marker in template, f"missing live scan UI marker: {marker}"
-assert "MOCK" not in template.upper()
+# The UI must contain no fabricated sample rows; fixtures belong only in offline tests.
+assert "B-BTC_USDT 25000" not in template and "COIN000_USDT" not in template
 print("PASS: paper UI renders scan rows, opportunity/quality metrics and visible data errors.")

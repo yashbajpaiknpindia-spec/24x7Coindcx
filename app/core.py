@@ -151,7 +151,10 @@ def refresh_markets(db: Session):
         price = num(t.get('last_price') or t.get('lastPrice') or t.get('close') or t.get('last'))
         volume = num(t.get('volume') or t.get('base_volume') or t.get('vol'))
         if price is not None and price > 0 and volume is not None and volume >= 0:
-            ranked.append((price*volume, pair))
+            # On the USDT-quoted ticker this field is already the exchange-reported
+            # 24h volume/turnover proxy. Multiplying by price would square the
+            # scale (e.g. BTC's ~$721m reported volume became ~$58t).
+            ranked.append((volume, pair))
     ranked.sort(reverse=True)
     discovered = list(dict.fromkeys(pair for _, pair in ranked))
     # The configured limit is the total unique universe, not 60 + the seed watchlist.
@@ -234,11 +237,11 @@ def refresh_markets(db: Session):
         book_bid, book_ask = top_of_book(sbook)
         bid = bid or book_bid; ask = ask or book_ask
         vol = num(st.get('volume'))
-        quote = (vol * last) if vol is not None and last is not None and vol >= 0 else None
+        quote = vol if vol is not None and vol >= 0 else None
         raw = {'spot_ticker':st, 'spot_detail':detail, 'spot_orderbook':sbook}
         row = db.scalar(select(MarketSnapshot).where(MarketSnapshot.product=='spot', MarketSnapshot.pair==pair))
         spot_status=str(detail.get('status') or 'active' if st else 'inactive').lower()
-        values = dict(last_price=last, bid=bid, ask=ask, quote_turnover_usdt=quote, liquidity_source='estimated_24h_base_volume_x_last' if quote is not None else 'unknown', active=bool(st) and spot_status=='active', exit_only=False, updated_at=now, raw_json=json.dumps(raw, default=str))
+        values = dict(last_price=last, bid=bid, ask=ask, quote_turnover_usdt=quote, liquidity_source='reported_24h_ticker_volume_usdt_pair' if quote is not None else 'unknown', active=bool(st) and spot_status=='active', exit_only=False, updated_at=now, raw_json=json.dumps(raw, default=str))
         if row:
             for k,v in values.items(): setattr(row,k,v)
         else: db.add(MarketSnapshot(product='spot', pair=pair, **values))
@@ -246,7 +249,7 @@ def refresh_markets(db: Session):
         ft = future_map.get(norm, {})
         f_last = num(ft.get('ls') or ft.get('last_price') or ft.get('lastPrice') or ft.get('p') or ft.get('last') or ft.get('mark_price'))
         f_vol = num(ft.get('v') or ft.get('volume'))
-        f_quote = (f_vol * f_last) if f_vol is not None and f_last is not None and f_vol >= 0 else None
+        f_quote = f_vol if f_vol is not None and f_vol >= 0 else None
         book = futures_books.get(pair, {})
         book_bid, book_ask = top_of_book(book)
         f_bid = num(ft.get('bid') or ft.get('best_bid')) or book_bid
@@ -257,13 +260,13 @@ def refresh_markets(db: Session):
         active_ok=(norm in active_set) and not exit_only and instr_status not in ('inactive','expired','delisted')
         rawf = {'future_ticker': ft, 'futures_orderbook': book, 'instrument': instr}
         row = db.scalar(select(MarketSnapshot).where(MarketSnapshot.product=='futures', MarketSnapshot.pair==pair))
-        values = dict(last_price=f_last, bid=f_bid, ask=f_ask, quote_turnover_usdt=f_quote, liquidity_source='estimated_24h_base_volume_x_last' if f_quote is not None else 'unknown', active=active_ok, exit_only=exit_only, updated_at=now, raw_json=json.dumps(rawf, default=str))
+        values = dict(last_price=f_last, bid=f_bid, ask=f_ask, quote_turnover_usdt=f_quote, liquidity_source='reported_24h_futures_volume_usdt_pair' if f_quote is not None else 'unknown', active=active_ok, exit_only=exit_only, updated_at=now, raw_json=json.dumps(rawf, default=str))
         if row:
             for k,v in values.items(): setattr(row,k,v)
         else: db.add(MarketSnapshot(product='futures', pair=pair, **values))
         updated += 1
     runtime = read_config(db, 'runtime', {})
-    runtime.update({'last_market_refresh': now.isoformat(), 'market_refresh_error': '; '.join(errors)[:1000] if errors else None, 'scan_universe_count': len(scan_universe), 'scan_universe_limit': broad_limit, 'scan_universe_pairs': scan_universe, 'scan_universe_source': 'live CoinDCX USDT tickers ranked by volume × last price plus legacy watchlist'})
+    runtime.update({'last_market_refresh': now.isoformat(), 'market_refresh_error': '; '.join(errors)[:1000] if errors else None, 'scan_universe_count': len(scan_universe), 'scan_universe_limit': broad_limit, 'scan_universe_pairs': scan_universe, 'scan_universe_source': 'live CoinDCX USDT tickers ranked by reported 24h volume (no price multiplier)'})
     write_config(db, 'runtime', runtime)
     if errors: log_event(db, 'Market refresh completed with partial failures.', 'WARNING', 'market_data', {'errors':errors,'snapshots_updated':updated})
     else: log_event(db, f'Market refresh completed ({updated} spot/futures snapshots updated).', 'INFO', 'market_data')

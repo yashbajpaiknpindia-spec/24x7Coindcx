@@ -1,3 +1,5 @@
+> **Volume semantics superseded by v1.4.4:** the exchange ticker's 24h `volume`/futures `v` is used directly as a screening proxy for a USDT pair. Do not multiply it by the latest price again. See `UPDATE_v1.4.4.md` for the correction and test coverage.
+
 # Update v1.4.3 — Live scanner and paper opportunity visibility
 
 ## Fixes
