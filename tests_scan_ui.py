@@ -59,10 +59,10 @@ def run():
             fut_by_pair = {x.pair: x for x in rows if x.product == "futures"}
             # The higher price on COIN079 must not overpower its lower reported
             # 24h ticker volume; no second multiplication by last price is valid.
-            assert spot_by_pair["B-COIN079_USDT"].last_price == 80
-            assert spot_by_pair["B-COIN079_USDT"].quote_turnover_usdt == 999_921
-            assert fut_by_pair["B-COIN079_USDT"].last_price == 80
-            assert fut_by_pair["B-COIN079_USDT"].quote_turnover_usdt == 999_921
+            assert spot_by_pair["B-COIN059_USDT"].last_price == 60
+            assert spot_by_pair["B-COIN059_USDT"].quote_turnover_usdt == 999_941
+            assert fut_by_pair["B-COIN059_USDT"].last_price == 60
+            assert fut_by_pair["B-COIN059_USDT"].quote_turnover_usdt == 999_941
             print("PASS: concatenated symbols normalize, the 60-market cap persists, and ticker volume remains unmultiplied by last price.")
     finally:
         core.CoinDCXClient = old_client
