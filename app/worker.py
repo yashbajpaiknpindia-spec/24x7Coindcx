@@ -51,7 +51,8 @@ def paper_cycle_due(cfg, runtime, now=None):
         latest_universe_count=last_universe_count=0
     universe_changed=(latest_universe_count > 0 and latest_universe_count > last_universe_count)
     engine_changed=last_cycle.get('paper_engine_version') != PAPER_ENGINE_VERSION
-    return bool(request_pending or ((daily_due or universe_changed or engine_changed) and retry_ready)), (request if request_pending else None)
+    engine_change_unattempted = engine_changed and runtime.get('paper_engine_migration_attempted_version') != PAPER_ENGINE_VERSION
+    return bool(request_pending or engine_change_unattempted or ((daily_due or universe_changed or engine_changed) and retry_ready)), (request if request_pending else None)
 
 
 def main():
@@ -99,6 +100,8 @@ def main():
                     if due:
                         attempted_at=datetime.now(timezone.utc).isoformat()
                         runtime['paper_cycle_attempted_at']=attempted_at
+                        if (runtime.get('last_strategy_cycle') or {}).get('paper_engine_version') != PAPER_ENGINE_VERSION:
+                            runtime['paper_engine_migration_attempted_version']=PAPER_ENGINE_VERSION
                         if queued_request:
                             runtime['paper_request_handled_at']=queued_request
                         runtime['paper_cycle_status']='running'
