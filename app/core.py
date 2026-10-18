@@ -301,10 +301,17 @@ def normalize_candles(rows):
 def calculate_scores(db: Session, config: dict):
     client = CoinDCXClient()
     runtime = read_config(db, 'runtime', {})
-    # Score the exchange-discovered universe as well as the legacy seed list.
-    # Previously refresh_markets discovered dozens of pairs but this function
-    # continued fetching candles for only the original 14.
-    universe = list(dict.fromkeys((config.get('pair_universe') or PAIR_UNIVERSE) + (runtime.get('scan_universe_pairs') or [])))
+    # Score the same unique market universe shown by the scanner. The live
+    # discovery list is already ranked and capped; seeds are only a fallback
+    # when discovery has not run yet, otherwise prepending them can silently
+    # inflate 60 markets to 74 and change the ranked opportunities.
+    discovered = runtime.get('scan_universe_pairs') or []
+    if discovered:
+        universe = list(dict.fromkeys(discovered))
+    else:
+        universe = list(dict.fromkeys(config.get('pair_universe') or PAIR_UNIVERSE))
+    universe_limit = max(20, min(150, int(runtime.get('scan_universe_limit') or env_int('SCAN_UNIVERSE_LIMIT', 60))))
+    universe = universe[:universe_limit]
     frames=[]; fetch_errors=[]
     def load(pair, product):
         rows = client.spot_candles(pair,'1h',500) if product=='spot' else client.futures_candles(pair,60,500)
