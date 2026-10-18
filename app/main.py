@@ -306,7 +306,8 @@ def api_paper_scan_results(request: Request):
                     eligible, eligibility_reason=False,'No market snapshot yet; waiting for a live scanner refresh'
                 position=open_map.get((product,pair))
                 trade=trade_map.get((product,pair))
-                signal=scored.get('signal','NO SCORE')
+                candidate_signal=scored.get('signal','NO SCORE')
+                signal=candidate_signal
                 signal_reason=scored.get('signal_reason','Strategy has not produced a score for this market yet')
                 hurdle=_entry_cost_hurdle_pct(product,cfg,snap) if snap and signal in ('LONG','SHORT') and eligible else None
                 expected_move=float(scored.get('expected_move_pct') or 0)
@@ -346,7 +347,7 @@ def api_paper_scan_results(request: Request):
                     'signal_reason':signal_reason,
                     'expected_move_pct':expected_move if scored else None,
                     'estimated_round_trip_cost_pct':hurdle,
-                    'required_move_pct':required_move if signal in ('LONG','SHORT') or scored else None,
+                    'required_move_pct':required_move if candidate_signal in ('LONG','SHORT') and hurdle is not None else None,
                     'cost_eligible':cost_eligible,
                     'paper_state':paper_state,
                     'paper_unrealized_pnl_inr':float(position.last_unrealized_pnl_inr or 0) if position else None,
