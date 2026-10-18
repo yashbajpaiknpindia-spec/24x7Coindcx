@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
-                   market_spread_bps, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
+                   market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
                    PAIR_UNIVERSE, STRATEGY_ID, STRATEGY_NAME, STRATEGY_VERSION, norm_pair, safe_json, env_float, env_int)
 from .live_engine import (reconcile_live_account, collect_market_telemetry, run_auto_live_cycle, latest_account_snapshot, latest_telemetry, _live_quality, _list_data, _assets, _free_balance, _futures_free_wallet, _metadata_quantity, _normalize_exchange_status)
 
@@ -24,7 +24,7 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.4.5', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.5.0', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
@@ -181,6 +181,22 @@ def paper_page(request: Request):
         positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True).order_by(desc(PaperPosition.opened_at))).all()
         trades=db.scalars(select(Trade).where(Trade.run_mode=='paper').order_by(desc(Trade.created_at)).limit(100)).all()
         closed=db.scalars(select(Trade).where(Trade.run_mode=='paper',Trade.status=='closed')).all()
+    now_utc=datetime.now(timezone.utc)
+    fx=float(cfg.get('inr_per_usdt',94.75))
+    for p in positions:
+        opened=p.opened_at.replace(tzinfo=timezone.utc) if p.opened_at.tzinfo is None else p.opened_at.astimezone(timezone.utc)
+        p.held_minutes=max(0,(now_utc-opened).total_seconds()/60)
+        p.invested_usdt=float(p.notional_usdt or abs(p.quantity*p.entry_price))
+        p.invested_inr=p.invested_usdt*fx
+        p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
+        stop=float(cfg.get('stop_loss_move_pct',0.75))/100
+        p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for t in trades:
+        opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
+        ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
+        t.held_minutes=max(0,(ended-opened).total_seconds()/60)
+        t.invested_usdt=abs(float(t.quantity or 0)*float(t.entry_price or 0))
+        t.invested_inr=t.invested_usdt*fx
     wins=sum(1 for t in closed if (t.net_pnl_inr or 0)>0)
     losses=sum(1 for t in closed if (t.net_pnl_inr or 0)<0)
     stats={'closed':len(closed),'wins':wins,'losses':losses,'win_rate':(100*wins/len(closed) if closed else None),
@@ -290,12 +306,25 @@ def api_paper_scan_results(request: Request):
                     eligible, eligibility_reason=False,'No market snapshot yet; waiting for a live scanner refresh'
                 position=open_map.get((product,pair))
                 trade=trade_map.get((product,pair))
+                candidate_signal=scored.get('signal','NO SCORE')
+                signal=candidate_signal
+                signal_reason=scored.get('signal_reason','Strategy has not produced a score for this market yet')
+                hurdle=_entry_cost_hurdle_pct(product,cfg,snap) if snap and signal in ('LONG','SHORT') and eligible else None
+                expected_move=float(scored.get('expected_move_pct') or 0)
+                required_move=max(float(cfg.get('min_expected_move_pct',0.75)),
+                                  (hurdle if hurdle is not None else 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
+                cost_eligible=bool(signal in ('LONG','SHORT') and hurdle is not None and expected_move >= required_move)
+                if signal in ('LONG','SHORT') and eligible and not cost_eligible:
+                    signal='WATCH'
+                    signal_reason=f'Blocked by cost gate: expected move {expected_move:.2f}% vs required {required_move:.2f}%; round-trip cost estimate {hurdle if hurdle is not None else "unknown"}%.'
                 if position:
                     paper_state='OPEN PAPER POSITION'
                 elif trade and trade.status=='closed':
                     paper_state='LAST TRADE CLOSED'
-                elif scored.get('signal') in ('LONG','SHORT'):
-                    paper_state='ELIGIBLE CANDIDATE' if eligible else 'BLOCKED BY LIQUIDITY GATE'
+                elif candidate_signal in ('LONG','SHORT') and eligible and not cost_eligible:
+                    paper_state='BLOCKED BY COST GATE'
+                elif signal in ('LONG','SHORT'):
+                    paper_state='ELIGIBLE CANDIDATE' if eligible and cost_eligible else 'BLOCKED BY LIQUIDITY / COST GATE'
                 elif scored:
                     paper_state='WATCH / NO ENTRY'
                 else:
@@ -316,8 +345,12 @@ def api_paper_scan_results(request: Request):
                     'strategy_turnover_proxy':scored.get('turnover_proxy'),
                     'strategy_rank':scored.get('strategy_rank'),
                     'liquid_shortlist':bool(scored.get('liquid_shortlist',False)),
-                    'signal':scored.get('signal','NO SCORE'),
-                    'signal_reason':scored.get('signal_reason','Strategy has not produced a score for this market yet'),
+                    'signal':signal,
+                    'signal_reason':signal_reason,
+                    'expected_move_pct':expected_move if scored else None,
+                    'estimated_round_trip_cost_pct':hurdle,
+                    'required_move_pct':required_move if candidate_signal in ('LONG','SHORT') and hurdle is not None else None,
+                    'cost_eligible':cost_eligible,
                     'paper_state':paper_state,
                     'paper_unrealized_pnl_inr':float(position.last_unrealized_pnl_inr or 0) if position else None,
                     'last_trade_status':trade.status if trade else None,
