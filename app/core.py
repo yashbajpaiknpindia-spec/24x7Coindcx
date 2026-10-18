@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import select, desc, func, delete
 from sqlalchemy.orm import Session
-from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, Trade, OrderRecord, BacktestResult, utcnow
+from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 
 PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USDT','B-XRP_USDT','B-DOGE_USDT','B-BNB_USDT','B-SUI_USDT','B-UNI_USDT','B-STRK_USDT','B-ENA_USDT','B-TRX_USDT','B-WLD_USDT']
@@ -553,6 +553,117 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
     pos.is_open=False; pos.last_mark_price=price; pos.last_unrealized_pnl_inr=0
 
 
+
+
+def evaluate_paper_decision_audits(db: Session, cfg: dict):
+    """Compare rejected and accepted signals with observed future executable quotes."""
+    now=utcnow()
+    horizons=[('1h',1,30),('4h',4,45),('24h',24,120)]
+    pending=db.scalars(select(PaperDecisionAudit).where(
+        (PaperDecisionAudit.evaluated_1h==False) | (PaperDecisionAudit.evaluated_4h==False) | (PaperDecisionAudit.evaluated_24h==False)
+    ).order_by(PaperDecisionAudit.decision_at.asc()).limit(1200)).all()
+    updated=0
+    for audit in pending:
+        decision_at=audit.decision_at.replace(tzinfo=timezone.utc) if audit.decision_at.tzinfo is None else audit.decision_at
+        if not audit.reference_price or audit.reference_price<=0 or audit.proposed_side not in ('buy','sell'):
+            continue
+        direction=1 if audit.proposed_side=='buy' else -1
+        for label,hours,tolerance_min in horizons:
+            flag='evaluated_'+label
+            if getattr(audit,flag):
+                continue
+            target=decision_at+timedelta(hours=hours)
+            if now < target:
+                continue
+            # A future quote is valid only close to the intended horizon; don't treat a
+            # stale next-day quote as a 1-hour result.
+            obs=db.scalar(select(MarketObservation).where(
+                MarketObservation.product==audit.product,
+                MarketObservation.pair==audit.pair,
+                MarketObservation.observed_at>=target,
+                MarketObservation.observed_at<=target+timedelta(minutes=tolerance_min),
+                MarketObservation.last_price.is_not(None)
+            ).order_by(MarketObservation.observed_at.asc()).limit(1))
+            if not obs:
+                continue
+            exit_price=(obs.bid if audit.proposed_side=='buy' else obs.ask) or obs.last_price
+            if not exit_price or exit_price<=0:
+                continue
+            gross=((float(exit_price)/float(audit.reference_price))-1)*direction*100
+            cost=float(audit.estimated_cost_pct) if audit.estimated_cost_pct is not None else None
+            setattr(audit,'outcome_'+label+'_pct',round(gross,5))
+            setattr(audit,'net_outcome_'+label+'_pct',round(gross-cost,5) if cost is not None else None)
+            setattr(audit,flag,True)
+            updated+=1
+    # Keep audit/history bounded; retain recent evidence, never trim actual trade ledgers.
+    db.execute(delete(PaperDecisionAudit).where(PaperDecisionAudit.decision_at < now-timedelta(days=90)))
+    count=db.scalar(select(func.count(PaperDecisionAudit.id))) or 0
+    if count>100000:
+        excess=count-100000
+        old_ids=select(PaperDecisionAudit.id).order_by(PaperDecisionAudit.decision_at.asc(),PaperDecisionAudit.id.asc()).limit(excess)
+        db.execute(delete(PaperDecisionAudit).where(PaperDecisionAudit.id.in_(old_ids)))
+    return updated
+
+
+def record_paper_decision_audits(db: Session, products: dict, viable: list, cfg: dict, snap_map: dict):
+    """Store each candidate gate decision so we can test whether rejections were justified."""
+    now=utcnow()
+    accepted={(p,i['pair'],s) for p,i,s,lev,snap,hurdle,expected in viable}
+    candidates=[]
+    for product in ('spot','futures'):
+        result=products.get(product,{})
+        if not isinstance(result,dict):
+            continue
+        if product=='spot':
+            candidates.extend((product,item,'buy') for item in result.get('longs',[]))
+        else:
+            candidates.extend((product,item,'buy') for item in result.get('longs',[]))
+            candidates.extend((product,item,'sell') for item in result.get('shorts',[]))
+    seen=set()
+    for product,item,side in candidates:
+        key=(product,item['pair'],side)
+        if key in seen:
+            continue
+        seen.add(key)
+        reason=''
+        decision='accepted' if key in accepted else 'rejected'
+        snap=snap_map.get((product,item['pair']))
+        hurdle=None
+        expected=float(item.get('expected_move_pct') or 0)
+        ref_price=None
+        if snap:
+            ref_price=(snap.ask if side=='buy' else snap.bid) or snap.last_price
+        if not item.get('strategy_eligible',True):
+            reason=item.get('exclusion_reason') or 'pair excluded from strategy'
+        elif not trend_confirmed_audit(item,side):
+            reason='trend confirmation failed: 14D score, 24H and 72H direction must agree'
+        else:
+            ok,why=market_eligibility(snap,cfg) if snap else (False,'no market snapshot')
+            if not ok:
+                reason='market/liquidity gate: '+why
+            else:
+                hurdle=_entry_cost_hurdle_pct(product,cfg,snap)
+                minimum=max(float(cfg.get('min_expected_move_pct',0.75)),
+                    (hurdle or 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
+                if hurdle is None or expected < minimum:
+                    reason=f'cost gate: expected move {expected:.3f}% below required {minimum:.3f}% (estimated round-trip cost {hurdle if hurdle is not None else "unknown"}%)'
+                elif key not in accepted:
+                    reason='not opened by current entry selection'
+        db.add(PaperDecisionAudit(decision_at=now,product=product,pair=item['pair'],proposed_side=side,
+            mode='unrestricted',decision=decision,rejection_reason=reason,reference_price=ref_price,
+            entry_bid=snap.bid if snap else None,entry_ask=snap.ask if snap else None,
+            expected_move_pct=expected,estimated_cost_pct=hurdle,score=float(item.get('score') or 0),
+            momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+            momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
+    evaluate_paper_decision_audits(db,cfg)
+
+
+def trend_confirmed_audit(item,side):
+    score=float(item.get('score') or 0)
+    m24=float(item.get('momentum_24h_pct') or 0)
+    m72=float(item.get('momentum_72h_pct') or 0)
+    return score>0 and m24>0 and m72>0 if side=='buy' else score<0 and m24<0 and m72<0
+
 def run_paper_cycle(db: Session, force: bool = False):
     cfg=read_config(db,'strategy_config',{})
     cfg.setdefault('capital_allocation_pct_per_position',10.0)
@@ -619,6 +730,8 @@ def run_paper_cycle(db: Session, force: bool = False):
                       'INFO','strategy_gate',{'expected_move_pct':expected,'round_trip_cost_pct':hurdle,'required_move_pct':minimum,'spread_bps':spread})
             continue
         viable.append((product,item,side,lev,snap,hurdle,expected))
+
+    record_paper_decision_audits(db, products, viable, cfg, snap_map)
 
     # Reconcile only positions that no longer qualify or whose target side changed.
     # Never liquidate a still-valid position simply because a scheduled scan ran.
