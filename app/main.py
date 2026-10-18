@@ -321,6 +321,8 @@ def api_paper_scan_results(request: Request):
                     paper_state='OPEN PAPER POSITION'
                 elif trade and trade.status=='closed':
                     paper_state='LAST TRADE CLOSED'
+                elif candidate_signal in ('LONG','SHORT') and eligible and not cost_eligible:
+                    paper_state='BLOCKED BY COST GATE'
                 elif signal in ('LONG','SHORT'):
                     paper_state='ELIGIBLE CANDIDATE' if eligible and cost_eligible else 'BLOCKED BY LIQUIDITY / COST GATE'
                 elif scored:
