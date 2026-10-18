@@ -192,3 +192,39 @@ class StrategyPosition(Base):
     realized_pnl_inr: Mapped[float] = mapped_column(Float, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     __table_args__ = (Index('idx_strategy_position_product_pair', 'product', 'pair', unique=True),)
+
+
+class PaperModePosition(Base):
+    """Independent capital-constrained paper ledger; never mixed with research positions."""
+    __tablename__ = 'paper_mode_positions'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String(24), default='capital_constrained', index=True)
+    product: Mapped[str] = mapped_column(String(16), index=True)
+    pair: Mapped[str] = mapped_column(String(40), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    notional_usdt: Mapped[float] = mapped_column(Float, default=0)
+    leverage: Mapped[float] = mapped_column(Float, default=1)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    strategy: Mapped[str] = mapped_column(String(100), default='CSM14D_VOL14D')
+    trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_unrealized_pnl_inr: Mapped[float] = mapped_column(Float, default=0)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
+class MarketObservation(Base):
+    """Append-only, bounded market snapshot history for later audits and backtests."""
+    __tablename__ = 'market_observations'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    product: Mapped[str] = mapped_column(String(16), index=True)
+    pair: Mapped[str] = mapped_column(String(40), index=True)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    turnover_usdt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (Index('idx_observation_product_pair_time', 'product', 'pair', 'observed_at'),)
