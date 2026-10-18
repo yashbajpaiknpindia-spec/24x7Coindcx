@@ -6,9 +6,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
@@ -24,7 +24,7 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.5.0', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.6.0', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
@@ -54,7 +54,7 @@ def health():
     try:
         with SessionLocal() as db:
             db.execute(select(ConfigKV.key).limit(1)).all()
-        return {'ok': True, 'service': APP_NAME, 'version': '1.4.5', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
+        return {'ok': True, 'service': APP_NAME, 'version': '1.6.0', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
     except Exception as exc:
         return JSONResponse({'ok': False, 'error': str(exc)[:200]}, status_code=503)
 
@@ -181,6 +181,42 @@ def paper_page(request: Request):
         positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True).order_by(desc(PaperPosition.opened_at))).all()
         trades=db.scalars(select(Trade).where(Trade.run_mode=='paper').order_by(desc(Trade.created_at)).limit(100)).all()
         closed=db.scalars(select(Trade).where(Trade.run_mode=='paper',Trade.status=='closed')).all()
+        capital_positions=db.scalars(select(PaperModePosition).where(PaperModePosition.is_open==True).order_by(desc(PaperModePosition.opened_at))).all()
+        capital_trades=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital').order_by(desc(Trade.created_at)).limit(100)).all()
+        capital_closed=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital',Trade.status=='closed')).all()
+        observation_count=db.scalar(select(func.count(MarketObservation.id))) or 0
+        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000)).all()
+        recent_audits=audits[:100]
+        audit_stats={}
+        for mode in ('unrestricted','capital_constrained'):
+            group=[a for a in audits if a.mode==mode]
+            rejected=[a for a in group if a.decision=='rejected']
+            accepted=[a for a in group if a.decision=='accepted']
+            data={'decisions':len(group),'rejected':len(rejected),'accepted':len(accepted),'reasons':{}}
+            def reason_key(a):
+                return (a.rejection_reason or 'unspecified').split(':',1)[0][:100]
+            for a in rejected:
+                reason=reason_key(a)
+                data['reasons'].setdefault(reason,{'count':0,'1h':{},'4h':{},'24h':{}})
+                data['reasons'][reason]['count']+=1
+            for horizon in ('1h','4h','24h'):
+                flag='evaluated_'+horizon; net='net_outcome_'+horizon+'_pct'
+                evaluated=[a for a in rejected if getattr(a,flag)]
+                false_rejections=[a for a in evaluated if getattr(a,net) is not None and getattr(a,net)>0]
+                right_rejections=[a for a in evaluated if getattr(a,net) is not None and getattr(a,net)<=0]
+                accepted_eval=[a for a in accepted if getattr(a,flag) and getattr(a,net) is not None]
+                data[horizon]={'evaluated_rejections':len(evaluated),'would_win':len(false_rejections),
+                    'likely_correct':len(right_rejections),'false_rejection_rate_pct':100*len(false_rejections)/len(evaluated) if evaluated else None,
+                    'accepted_evaluated':len(accepted_eval),'accepted_wins':sum(1 for a in accepted_eval if getattr(a,net)>0),
+                    'accepted_net_avg_pct':sum(getattr(a,net) for a in accepted_eval)/len(accepted_eval) if accepted_eval else None}
+                for reason,reason_data in data['reasons'].items():
+                    reason_rows=[a for a in rejected if reason_key(a)==reason and getattr(a,flag) and getattr(a,net) is not None]
+                    reason_wins=[a for a in reason_rows if getattr(a,net)>0]
+                    reason_losses=[a for a in reason_rows if getattr(a,net)<=0]
+                    reason_data[horizon]={'evaluated':len(reason_rows),'would_win':len(reason_wins),'likely_correct':len(reason_losses),
+                        'false_rejection_rate_pct':100*len(reason_wins)/len(reason_rows) if reason_rows else None,
+                        'average_net_pct':sum(getattr(a,net) for a in reason_rows)/len(reason_rows) if reason_rows else None}
+            audit_stats[mode]=data
     now_utc=datetime.now(timezone.utc)
     fx=float(cfg.get('inr_per_usdt',94.75))
     for p in positions:
@@ -191,6 +227,18 @@ def paper_page(request: Request):
         p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
         stop=float(cfg.get('stop_loss_move_pct',0.75))/100
         p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for p in capital_positions:
+        opened=p.opened_at.replace(tzinfo=timezone.utc) if p.opened_at.tzinfo is None else p.opened_at.astimezone(timezone.utc)
+        p.held_minutes=max(0,(now_utc-opened).total_seconds()/60)
+        p.invested_usdt=float(p.notional_usdt or abs(p.quantity*p.entry_price))
+        p.invested_inr=p.invested_usdt*fx
+        p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
+        stop=float(cfg.get('stop_loss_move_pct',0.75))/100
+        p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for t in capital_trades:
+        opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
+        ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
+        t.held_minutes=max(0,(ended-opened).total_seconds()/60)
     for t in trades:
         opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
         ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
@@ -202,7 +250,17 @@ def paper_page(request: Request):
     stats={'closed':len(closed),'wins':wins,'losses':losses,'win_rate':(100*wins/len(closed) if closed else None),
            'profit_factor':(sum(t.net_pnl_inr for t in closed if (t.net_pnl_inr or 0)>0)/abs(sum(t.net_pnl_inr for t in closed if (t.net_pnl_inr or 0)<0)) if any((t.net_pnl_inr or 0)<0 for t in closed) else None),
            'net_pnl_inr':sum(t.net_pnl_inr or 0 for t in closed)}
-    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats))
+    capital_wins=sum(1 for t in capital_closed if (t.net_pnl_inr or 0)>0)
+    capital_losses=abs(sum(t.net_pnl_inr or 0 for t in capital_closed if (t.net_pnl_inr or 0)<0))
+    capital_gain=sum(t.net_pnl_inr or 0 for t in capital_closed if (t.net_pnl_inr or 0)>0)
+    capital_net=sum(t.net_pnl_inr or 0 for t in capital_closed)
+    capital_reserved=sum(float(p.notional_usdt or 0)*fx/max(float(p.leverage or 1),1.0) for p in capital_positions)
+    capital_stats={'closed':len(capital_closed),'wins':capital_wins,'losses':sum(1 for t in capital_closed if (t.net_pnl_inr or 0)<0),
+        'win_rate':(100*capital_wins/len(capital_closed) if capital_closed else None),
+        'profit_factor':(capital_gain/capital_losses if capital_losses>0 else None),'net_pnl_inr':capital_net,
+        'open':len(capital_positions),'reserved_margin_inr':capital_reserved,'capital_inr':float(cfg.get('starting_capital_inr',30000)),
+        'available_margin_inr':max(0.0,float(cfg.get('starting_capital_inr',30000))-capital_reserved)}
+    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats,capital_positions=capital_positions,capital_trades=capital_trades,capital_stats=capital_stats,observation_count=observation_count,audit_stats=audit_stats,recent_audits=recent_audits))
 
 @app.post('/paper/start')
 def paper_start(request: Request):
@@ -251,9 +309,79 @@ def api_paper_status(request: Request):
             'paper_cycle_status':runtime.get('paper_cycle_status','waiting'),'paper_cycle_message':runtime.get('paper_cycle_message','No paper cycle has been recorded yet.'),
             'paper_cycle_attempted_at':runtime.get('paper_cycle_attempted_at'),'paper_last_cycle':cfg.get('paper_last_cycle'),
             'last_strategy_cycle':cycle,'candle_diagnostics':diag,'open_positions':db.scalar(select(func.count(PaperPosition.id)).where(PaperPosition.is_open==True)) or 0,
-            'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0}
+            'capital_constrained_open_positions':db.scalar(select(func.count(PaperModePosition.id)).where(PaperModePosition.is_open==True)) or 0,
+            'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0,
+            'capital_constrained_closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper_capital',Trade.status=='closed')) or 0}
 
 
+
+
+
+@app.get('/api/paper-rejection-audit')
+def api_paper_rejection_audit(request: Request):
+    if not authed(request): return JSONResponse({'error':'login_required'}, status_code=401)
+    with SessionLocal() as db:
+        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(100)).all()
+        payload=[]
+        for a in audits:
+            payload.append({'id':a.id,'at':a.decision_at.isoformat() if a.decision_at else None,'mode':a.mode,
+                'product':a.product,'pair':a.pair,'side':a.proposed_side,'decision':a.decision,'reason':a.rejection_reason,
+                'expected_move_pct':a.expected_move_pct,'estimated_cost_pct':a.estimated_cost_pct,
+                'outcome_1h_pct':a.outcome_1h_pct,'net_outcome_1h_pct':a.net_outcome_1h_pct,'evaluated_1h':a.evaluated_1h,
+                'outcome_4h_pct':a.outcome_4h_pct,'net_outcome_4h_pct':a.net_outcome_4h_pct,'evaluated_4h':a.evaluated_4h,
+                'outcome_24h_pct':a.outcome_24h_pct,'net_outcome_24h_pct':a.net_outcome_24h_pct,'evaluated_24h':a.evaluated_24h})
+        summary={}
+        recent_ids=select(PaperDecisionAudit.id).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000).subquery()
+        for mode in ('unrestricted','capital_constrained'):
+            base=select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.mode==mode,PaperDecisionAudit.decision=='rejected')
+            summary[mode+'_rejected']=db.scalar(base) or 0
+        summary['rejected_would_win_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
+            PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct>0)) or 0
+        summary['rejected_correct_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
+            PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct<=0)) or 0
+        summary['total_decisions']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.id.in_(select(recent_ids.c.id)))) or 0
+        return {'count':len(payload),'total_decisions':summary['total_decisions'],'summary':summary,'retention_days':90,'decisions':payload}
+
+@app.get('/api/system-health')
+def api_system_health(request: Request):
+    """Bounded operational telemetry: process RSS, configured memory ceiling, and DB footprint."""
+    if not authed(request):
+        return JSONResponse({'error':'login_required'}, status_code=401)
+    memory_bytes=None
+    try:
+        with open('/proc/self/status','r',encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    memory_bytes=int(line.split()[1])*1024
+                    break
+    except Exception:
+        pass
+    memory_limit=int(float(os.getenv('RENDER_MEMORY_LIMIT_MB','512'))*1024*1024)
+    db_info={'engine':engine.dialect.name,'database_bytes':None,'table_bytes':None,'allocated_disk_bytes':int(float(os.getenv('DB_DISK_GB','15'))*1024**3),'observation_rows':0,'market_snapshot_rows':0,'trade_rows':0,'event_rows':0,'history_window_days':30,'history_hard_row_cap':100000}
+    try:
+        with SessionLocal() as db:
+            db_info['observation_rows']=db.scalar(select(func.count(MarketObservation.id))) or 0
+            db_info['market_snapshot_rows']=db.scalar(select(func.count(MarketSnapshot.id))) or 0
+            db_info['trade_rows']=db.scalar(select(func.count(Trade.id))) or 0
+            db_info['event_rows']=db.scalar(select(func.count(Event.id))) or 0
+            if engine.dialect.name=='postgresql':
+                row=db.execute(text("SELECT pg_database_size(current_database()) AS db_bytes")).mappings().first()
+                if row: db_info['database_bytes']=int(row['db_bytes'])
+                row=db.execute(text("SELECT COALESCE(SUM(pg_total_relation_size((quote_ident(schemaname)||'.'||quote_ident(tablename))::regclass)),0) AS table_bytes FROM pg_tables WHERE schemaname='public'")).mappings().first()
+                if row: db_info['table_bytes']=int(row['table_bytes'])
+            elif engine.dialect.name=='sqlite':
+                row=db.execute(text('PRAGMA page_count')).scalar() or 0
+                pagesize=db.execute(text('PRAGMA page_size')).scalar() or 0
+                db_info['database_bytes']=int(row*pagesize)
+                db_info['table_bytes']=db_info['database_bytes']
+    except Exception as exc:
+        db_info['error']=str(exc)[:180]
+    used=db_info.get('database_bytes')
+    db_info['estimated_disk_remaining_bytes']=max(0,db_info['allocated_disk_bytes']-used) if used is not None else None
+    return {'as_of':datetime.now(timezone.utc).isoformat(),'process_memory_rss_bytes':memory_bytes,
+        'memory_limit_bytes':memory_limit,'memory_used_pct':round(memory_bytes/memory_limit*100,2) if memory_bytes is not None and memory_limit else None,
+        'memory_remaining_bytes':max(0,memory_limit-memory_bytes) if memory_bytes is not None else None,'database':db_info,
+        'note':'RSS is this web process, not a replacement for Render service-level peak metrics. Database remaining space is an estimate from configured disk size minus database size.'}
 
 @app.get('/api/paper-scan-results')
 def api_paper_scan_results(request: Request):

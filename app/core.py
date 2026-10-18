@@ -1,16 +1,16 @@
 import json, os, math, time, statistics
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, delete
 from sqlalchemy.orm import Session
-from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, Trade, OrderRecord, BacktestResult, utcnow
+from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 
 PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USDT','B-XRP_USDT','B-DOGE_USDT','B-BNB_USDT','B-SUI_USDT','B-UNI_USDT','B-STRK_USDT','B-ENA_USDT','B-TRX_USDT','B-WLD_USDT']
 STRATEGY_ID = 'CSM14D_VOL14D_LIQ7D_DAILY'
 STRATEGY_NAME = '14D Cross-Sectional Momentum / Volatility Rank'
 STRATEGY_VERSION = '1.0.0-research-reproduction'
-PAPER_ENGINE_VERSION = '1.5.0-risk-exits-cost-gates'
+PAPER_ENGINE_VERSION = '1.6.0-dual-ledger-storage-telemetry'
 # Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
 # ranks, which can manufacture large scores from tiny price noise. Keep them visible
 # in the market scanner, but don't allow them into trend strategy candidates.
@@ -281,6 +281,28 @@ def refresh_markets(db: Session):
             for k,v in values.items(): setattr(row,k,v)
         else: db.add(MarketSnapshot(product='futures', pair=pair, **values))
         updated += 1
+    # Sample each pair at most once every 5 minutes. A per-minute row for every
+    # scanned pair would crowd out 24h counterfactuals on a small Postgres disk.
+    last_obs_rows=db.execute(select(MarketObservation.product,MarketObservation.pair,func.max(MarketObservation.observed_at)).group_by(MarketObservation.product,MarketObservation.pair)).all()
+    last_obs={(product,pair):(ts.replace(tzinfo=timezone.utc) if ts and ts.tzinfo is None else ts) for product,pair,ts in last_obs_rows}
+    for snap in db.scalars(select(MarketSnapshot)).all():
+        previous=last_obs.get((snap.product,snap.pair))
+        if previous and (now-previous).total_seconds()<300:
+            continue
+        db.add(MarketObservation(observed_at=now, product=snap.product, pair=snap.pair,
+            last_price=snap.last_price, bid=snap.bid, ask=snap.ask,
+            turnover_usdt=snap.quote_turnover_usdt, active=snap.active,
+            source_updated_at=snap.updated_at))
+    db.flush()
+    # Retain up to 30 days, with an independent hard row cap to protect DB storage.
+    db.execute(delete(MarketObservation).where(MarketObservation.observed_at < now - timedelta(days=30)))
+    observation_count = db.scalar(select(func.count(MarketObservation.id))) or 0
+    if observation_count > 100000:
+        excess = observation_count - 100000
+        oldest_ids = select(MarketObservation.id).order_by(MarketObservation.observed_at.asc(), MarketObservation.id.asc()).limit(excess)
+        db.execute(delete(MarketObservation).where(MarketObservation.id.in_(oldest_ids)))
+    # Evaluate pending counterfactuals on every market refresh, not just strategy rebalance.
+    evaluate_paper_decision_audits(db, read_config(db,'strategy_config',{}))
     runtime = read_config(db, 'runtime', {})
     runtime.update({'last_market_refresh': now.isoformat(), 'market_refresh_error': '; '.join(errors)[:1000] if errors else None, 'scan_universe_count': len(scan_universe), 'scan_universe_limit': broad_limit, 'scan_universe_pairs': scan_universe, 'scan_universe_source': 'live CoinDCX USDT tickers ranked by reported 24h volume (no price multiplier)'})
     write_config(db, 'runtime', runtime)
@@ -465,8 +487,10 @@ def mark_paper_positions(db: Session):
     now = utcnow()
     snapshots = {(s.product, s.pair): s for s in db.scalars(select(MarketSnapshot)).all()}
     positions = db.scalars(select(PaperPosition).where(PaperPosition.is_open == True)).all()
+    constrained_positions = db.scalars(select(PaperModePosition).where(PaperModePosition.is_open == True)).all()
+    all_positions = positions + constrained_positions
     closed = 0
-    for pos in positions:
+    for pos in all_positions:
         snap = snapshots.get((pos.product, pos.pair))
         if not snap or not snap.last_price or not pos.entry_price:
             continue
@@ -507,7 +531,7 @@ def mark_paper_positions(db: Session):
                        'adverse_move_pct': adverse_move_pct, 'stop_loss_move_pct': stop_pct})
             closed += 1
     db.commit()
-    return {'marked': len(positions), 'protective_exits': closed}
+    return {'marked': len(all_positions), 'protective_exits': closed}
 
 
 def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: dict, reason='signal rebalance exit'):
@@ -538,8 +562,119 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
     pos.is_open=False; pos.last_mark_price=price; pos.last_unrealized_pnl_inr=0
 
 
+
+
+def evaluate_paper_decision_audits(db: Session, cfg: dict):
+    """Compare rejected and accepted signals with observed future executable quotes."""
+    now=utcnow()
+    horizons=[('1h',1,30),('4h',4,45),('24h',24,120)]
+    pending=db.scalars(select(PaperDecisionAudit).where(
+        (PaperDecisionAudit.evaluated_1h==False) | (PaperDecisionAudit.evaluated_4h==False) | (PaperDecisionAudit.evaluated_24h==False)
+    ).order_by(PaperDecisionAudit.decision_at.asc()).limit(1200)).all()
+    updated=0
+    for audit in pending:
+        decision_at=audit.decision_at.replace(tzinfo=timezone.utc) if audit.decision_at.tzinfo is None else audit.decision_at
+        if not audit.reference_price or audit.reference_price<=0 or audit.proposed_side not in ('buy','sell'):
+            continue
+        direction=1 if audit.proposed_side=='buy' else -1
+        for label,hours,tolerance_min in horizons:
+            flag='evaluated_'+label
+            if getattr(audit,flag):
+                continue
+            target=decision_at+timedelta(hours=hours)
+            if now < target:
+                continue
+            # A future quote is valid only close to the intended horizon; don't treat a
+            # stale next-day quote as a 1-hour result.
+            obs=db.scalar(select(MarketObservation).where(
+                MarketObservation.product==audit.product,
+                MarketObservation.pair==audit.pair,
+                MarketObservation.observed_at>=target,
+                MarketObservation.observed_at<=target+timedelta(minutes=tolerance_min),
+                MarketObservation.last_price.is_not(None)
+            ).order_by(MarketObservation.observed_at.asc()).limit(1))
+            if not obs:
+                continue
+            exit_price=(obs.bid if audit.proposed_side=='buy' else obs.ask) or obs.last_price
+            if not exit_price or exit_price<=0:
+                continue
+            gross=((float(exit_price)/float(audit.reference_price))-1)*direction*100
+            cost=float(audit.estimated_cost_pct) if audit.estimated_cost_pct is not None else None
+            setattr(audit,'outcome_'+label+'_pct',round(gross,5))
+            setattr(audit,'net_outcome_'+label+'_pct',round(gross-cost,5) if cost is not None else None)
+            setattr(audit,flag,True)
+            updated+=1
+    # Keep audit/history bounded; retain recent evidence, never trim actual trade ledgers.
+    db.execute(delete(PaperDecisionAudit).where(PaperDecisionAudit.decision_at < now-timedelta(days=90)))
+    count=db.scalar(select(func.count(PaperDecisionAudit.id))) or 0
+    if count>100000:
+        excess=count-100000
+        old_ids=select(PaperDecisionAudit.id).order_by(PaperDecisionAudit.decision_at.asc(),PaperDecisionAudit.id.asc()).limit(excess)
+        db.execute(delete(PaperDecisionAudit).where(PaperDecisionAudit.id.in_(old_ids)))
+    return updated
+
+
+def record_paper_decision_audits(db: Session, products: dict, viable: list, cfg: dict, snap_map: dict):
+    """Store each candidate gate decision so we can test whether rejections were justified."""
+    now=utcnow()
+    accepted={(p,i['pair'],s) for p,i,s,lev,snap,hurdle,expected in viable}
+    candidates=[]
+    for product in ('spot','futures'):
+        result=products.get(product,{})
+        if not isinstance(result,dict):
+            continue
+        if product=='spot':
+            candidates.extend((product,item,'buy') for item in result.get('longs',[]))
+        else:
+            candidates.extend((product,item,'buy') for item in result.get('longs',[]))
+            candidates.extend((product,item,'sell') for item in result.get('shorts',[]))
+    seen=set()
+    for product,item,side in candidates:
+        key=(product,item['pair'],side)
+        if key in seen:
+            continue
+        seen.add(key)
+        reason=''
+        decision='accepted' if key in accepted else 'rejected'
+        snap=snap_map.get((product,item['pair']))
+        expected=float(item.get('expected_move_pct') or 0)
+        hurdle=_entry_cost_hurdle_pct(product,cfg,snap) if snap else None
+        ref_price=None
+        if snap:
+            ref_price=(snap.ask if side=='buy' else snap.bid) or snap.last_price
+        if not item.get('strategy_eligible',True):
+            reason=item.get('exclusion_reason') or 'pair excluded from strategy'
+        elif not trend_confirmed_audit(item,side):
+            reason='trend confirmation failed: 14D score, 24H and 72H direction must agree'
+        else:
+            ok,why=market_eligibility(snap,cfg) if snap else (False,'no market snapshot')
+            if not ok:
+                reason='market/liquidity gate: '+why
+            else:
+                minimum=max(float(cfg.get('min_expected_move_pct',0.75)),
+                    (hurdle or 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
+                if hurdle is None or expected < minimum:
+                    reason=f'cost gate: expected move {expected:.3f}% below required {minimum:.3f}% (estimated round-trip cost {hurdle if hurdle is not None else "unknown"}%)'
+                elif key not in accepted:
+                    reason='not opened by current entry selection'
+        db.add(PaperDecisionAudit(decision_at=now,product=product,pair=item['pair'],proposed_side=side,
+            mode='unrestricted',decision=decision,rejection_reason=reason,reference_price=ref_price,
+            entry_bid=snap.bid if snap else None,entry_ask=snap.ask if snap else None,
+            expected_move_pct=expected,estimated_cost_pct=hurdle,score=float(item.get('score') or 0),
+            momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+            momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
+    evaluate_paper_decision_audits(db,cfg)
+
+
+def trend_confirmed_audit(item,side):
+    score=float(item.get('score') or 0)
+    m24=float(item.get('momentum_24h_pct') or 0)
+    m72=float(item.get('momentum_72h_pct') or 0)
+    return score>0 and m24>0 and m72>0 if side=='buy' else score<0 and m24<0 and m72<0
+
 def run_paper_cycle(db: Session, force: bool = False):
     cfg=read_config(db,'strategy_config',{})
+    cfg.setdefault('capital_allocation_pct_per_position',10.0)
     if not cfg.get('paper_enabled') and not force:
         return {'ok':False,'message':'Paper engine is paused. Enable paper trading first.'}
     scores=calculate_scores(db,cfg)
@@ -604,6 +739,8 @@ def run_paper_cycle(db: Session, force: bool = False):
             continue
         viable.append((product,item,side,lev,snap,hurdle,expected))
 
+    record_paper_decision_audits(db, products, viable, cfg, snap_map)
+
     # Reconcile only positions that no longer qualify or whose target side changed.
     # Never liquidate a still-valid position simply because a scheduled scan ran.
     desired={(product,item['pair']):(side,product,item,lev,snap,hurdle,expected)
@@ -654,20 +791,88 @@ def run_paper_cycle(db: Session, force: bool = False):
         db.add(PaperPosition(product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,notional_usdt=each_notional,leverage=lev,
                              opened_at=utcnow(),strategy=STRATEGY_ID,trade_id=trade.id,last_mark_price=price,last_unrealized_pnl_inr=0,is_open=True))
         opened+=1
+    # Independent capital-constrained track. It consumes only its own positions/trades;
+    # unrestricted research above remains fixed-notional and is not affected by capital.
+    capital_inr=max(0.0,float(cfg.get('starting_capital_inr',30000)))
+    allocation_pct=max(1.0,min(50.0,float(cfg.get('capital_allocation_pct_per_position',10.0))))
+    constrained_open=db.scalars(select(PaperModePosition).where(PaperModePosition.is_open==True)).all()
+    constrained_desired={(p,i['pair']):(side,p,i,lev,snap,hurdle,expected)
+        for p,i,side,lev,snap,hurdle,expected in viable}
+    for pos in constrained_open:
+        target=constrained_desired.get((pos.product,pos.pair))
+        if target and target[0]==pos.side:
+            continue
+        snap=snap_map.get((pos.product,pos.pair))
+        if snap and snap.last_price:
+            age=(utcnow()-(snap.updated_at.replace(tzinfo=timezone.utc) if snap.updated_at.tzinfo is None else snap.updated_at)).total_seconds()
+            if age < int(cfg.get('max_stale_seconds',120)):
+                px=(snap.bid if pos.side=='buy' else snap.ask) or snap.last_price
+                _close_paper_position(db,pos,float(px),cfg,reason='capital track: signal no longer qualifies or direction changed')
+    db.flush()
+    constrained_open=db.scalars(select(PaperModePosition).where(PaperModePosition.is_open==True)).all()
+    constrained_map={(p.product,p.pair):p for p in constrained_open}
+    reserved_margin_inr=sum(float(p.notional_usdt or 0)*fx/max(float(p.leverage or 1),1.0) for p in constrained_open)
+    capital_opened=0
+    for product,item,side,lev,snap,hurdle,expected in viable:
+        key=(product,item['pair'])
+        if key in constrained_map:
+            continue
+        available=max(0.0,capital_inr-reserved_margin_inr)
+        allocation=min(available,capital_inr*allocation_pct/100.0)
+        if allocation <= 1.0:
+            reason=f'insufficient available capital/margin: ₹{available:.2f} available; required allocation is above ₹1.00'
+            db.add(PaperDecisionAudit(decision_at=utcnow(),product=product,pair=item['pair'],proposed_side=side,
+                mode='capital_constrained',decision='rejected',rejection_reason=reason,
+                reference_price=float(snap.ask if side=='buy' else snap.bid) if (snap.ask if side=='buy' else snap.bid) else snap.last_price,
+                entry_bid=snap.bid,entry_ask=snap.ask,expected_move_pct=expected,estimated_cost_pct=hurdle,
+                score=float(item.get('score') or 0),momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+                momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
+            log_event(db,f'Skipped capital-constrained entry {product} {item["pair"]}: insufficient unreserved paper capital.', 'INFO','capital_gate',{'available_margin_inr':available})
+            continue
+        effective_lev=max(1.0,float(lev if product=='futures' else 1.0))
+        notional=min(float(cfg.get('research_notional_usdt',1000.0)), allocation*effective_lev/max(fx,1.0))
+        required_margin=notional*fx/effective_lev
+        if notional <= 0 or required_margin > available+0.01:
+            continue
+        price=float(snap.ask if side=='buy' else snap.bid)
+        if price <= 0 or not math.isfinite(price):
+            continue
+        qty=notional/price
+        fee_pct=float(cfg.get('spot_fee_pct' if product=='spot' else 'futures_fee_pct',0.15 if product=='spot' else 0.075))/100
+        slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
+        fees=notional*fee_pct*fx; slips=notional*slip_pct*fx
+        trade=Trade(run_mode='paper_capital',product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,leverage=effective_lev,
+            fees_inr=fees,slippage_inr=slips,net_pnl_inr=-(fees+slips),gross_pnl_inr=0,status='open',strategy=STRATEGY_ID,
+            reason='capital-constrained entry; margin reserved against configured starting capital',
+            metadata_json=json.dumps({'paper_mode':'capital_constrained','capital_inr':capital_inr,'reserved_margin_inr':required_margin,
+                'allocation_pct':allocation_pct,'score':item.get('score'),'momentum_24h_pct':item.get('momentum_24h_pct'),
+                'momentum_72h_pct':item.get('momentum_72h_pct'),'expected_move_pct':expected,
+                'estimated_round_trip_cost_pct':hurdle,'entry_bid':snap.bid,'entry_ask':snap.ask}))
+        db.add(PaperDecisionAudit(decision_at=utcnow(),product=product,pair=item['pair'],proposed_side=side,
+            mode='capital_constrained',decision='accepted',rejection_reason='',reference_price=price,
+            entry_bid=snap.bid,entry_ask=snap.ask,expected_move_pct=expected,estimated_cost_pct=hurdle,
+            score=float(item.get('score') or 0),momentum_24h_pct=float(item.get('momentum_24h_pct') or 0),
+            momentum_72h_pct=float(item.get('momentum_72h_pct') or 0)))
+        db.add(trade); db.flush()
+        db.add(PaperModePosition(mode='capital_constrained',product=product,pair=item['pair'],side=side,quantity=qty,
+            entry_price=price,notional_usdt=notional,leverage=effective_lev,opened_at=utcnow(),strategy=STRATEGY_ID,
+            trade_id=trade.id,last_mark_price=price,last_unrealized_pnl_inr=0,is_open=True))
+        reserved_margin_inr += required_margin
+        capital_opened += 1
     cfg['paper_last_cycle']=utcnow().isoformat(); cfg['last_error']=None; write_config(db,'strategy_config',cfg)
     runtime=read_config(db,'runtime',{})
     runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'ok','scan_universe_count':runtime.get('scan_universe_count',0),
         'signals':{k:len(v.get('all_scored',[])) for k,v in products.items()},
-        'opened_positions':opened,'selected_signals':len(selected),'eligible_signals':len(viable),
+        'opened_positions':opened,'capital_track_opened_positions':capital_opened,'capital_track_open_positions':len(constrained_open)+capital_opened,'selected_signals':len(selected),'eligible_signals':len(viable),
         'candle_diagnostics':diagnostics,'paper_engine_version':PAPER_ENGINE_VERSION}
     runtime['paper_cycle_status']='completed'
-    runtime['paper_cycle_message']=f"Cycle completed; scored {sum(len(v.get('all_scored',[])) for v in products.values())} product/pair records, opened {opened}, retained {len(still_open)} existing positions and rejected {len(selected)-len(viable)} candidates at market/cost gates."
+    runtime['paper_cycle_message']=f"Dual-mode cycle completed; scored {sum(len(v.get('all_scored',[])) for v in products.values())} product/pair records; unrestricted research opened {opened}, capital-constrained track opened {capital_opened}, and {len(selected)-len(viable)} candidates failed market/cost gates."
     runtime['paper_cycle_attempted_at']=utcnow().isoformat(); write_config(db,'runtime',runtime)
     log_event(db,f"Paper strategy cycle completed: {opened} new positions opened; {len(still_open)} retained.",'INFO','paper',
               {'strategy':STRATEGY_ID,'selected':[{'product':p,'pair':i['pair'],'side':side,'score':i['score']} for p,i,side,lev,snap,hurdle,expected in viable],
                'diagnostics':diagnostics})
     db.commit()
-    return {'ok':True,'message':runtime['paper_cycle_message'],'signals':products,'opened_positions':opened,'diagnostics':diagnostics}
+    return {'ok':True,'message':runtime['paper_cycle_message'],'signals':products,'opened_positions':opened,'capital_track_opened_positions':capital_opened,'diagnostics':diagnostics}
 
 def dashboard_summary(db: Session):
     cfg=read_config(db,'strategy_config',{}); live=read_config(db,'live_state',{}); runtime=read_config(db,'runtime',{})
