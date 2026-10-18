@@ -1,4 +1,10 @@
-# CoinDCX Strategy Terminal (v1.4.4)
+# CoinDCX Strategy Terminal (v1.4.5)
+
+## Stablecoin momentum guard (v1.4.5)
+
+- USDT pairs whose base asset is a known pegged stablecoin (including USDC and USD1) remain in the live market scan and liquidity table, but are labeled `EXCLUDED` from this momentum/volatility strategy's shortlist and entry signals. Tiny stablecoin price noise divided by near-zero volatility can otherwise produce an exaggerated score.
+- The paper engine records a build/version marker. On the first worker cycle after a strategy-rule version change, it refreshes/rebalances paper once against the new rules, then records that version to avoid repeating the migration cycle each minute.
+- This is a strategy eligibility guard, not a blanket ban on trading stablecoins by other strategies. Historical performance from earlier rules should not be mixed with the updated version.
 
 ## Reported ticker-volume correction (v1.4.4)
 

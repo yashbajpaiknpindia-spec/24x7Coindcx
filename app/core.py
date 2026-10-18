@@ -10,6 +10,22 @@ PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USD
 STRATEGY_ID = 'CSM14D_VOL14D_LIQ7D_DAILY'
 STRATEGY_NAME = '14D Cross-Sectional Momentum / Volatility Rank'
 STRATEGY_VERSION = '1.0.0-research-reproduction'
+PAPER_ENGINE_VERSION = '1.4.5-stablecoin-filter'
+# Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
+# ranks, which can manufacture large scores from tiny price noise. Keep them visible
+# in the market scanner, but don't allow them into trend strategy candidates.
+STABLECOIN_BASE_ASSETS = frozenset({
+    'USDC','USD1','USDE','USDD','USDS','USDP','FDUSD','TUSD','DAI','BUSD',
+    'PYUSD','RLUSD','EURC','EURI','USDQ','USDX','USDK','USDT'
+})
+
+def strategy_pair_exclusion_reason(pair):
+    token = str(pair or '').upper().split('_', 1)[0]
+    if token.startswith('B-'):
+        token = token[2:]
+    if token in STABLECOIN_BASE_ASSETS:
+        return 'Stablecoin base asset excluded from momentum entries; kept visible in market scan'
+    return None
 
 def env_float(k, d):
     try: return float(os.getenv(k, d))
@@ -349,12 +365,19 @@ def calculate_scores(db: Session, config: dict):
         vol = statistics.pstdev(returns) if len(returns)>2 else 0
         score = momentum / max(vol, 0.0001)
         turnover = statistics.mean([closes[i]*vols[i] for i in range(max(0,len(closes)-7*24),len(closes))])
-        score_results.setdefault(product,[]).append({'pair':pair,'score':score,'momentum_pct':momentum*100,'hourly_volatility_pct':vol*100,'turnover_proxy':turnover,'last_price':closes[-1]})
+        exclusion_reason = strategy_pair_exclusion_reason(pair)
+        score_results.setdefault(product,[]).append({
+            'pair':pair,'score':score,'momentum_pct':momentum*100,
+            'hourly_volatility_pct':vol*100,'turnover_proxy':turnover,
+            'last_price':closes[-1], 'strategy_eligible':not bool(exclusion_reason),
+            'exclusion_reason':exclusion_reason
+        })
     # Rank by each market's candle-derived turnover proxy, but report actual coverage.
     for product, items in list(score_results.items()):
         items.sort(key=lambda x:x['turnover_proxy'], reverse=True)
+        strategy_items=[x for x in items if x.get('strategy_eligible',True)]
         top_n=int(config.get('liquid_universe_size',8))
-        liquid=items[:top_n]
+        liquid=strategy_items[:top_n]
         liquid.sort(key=lambda x:x['score'])
         score_results[product]={'liquid_universe':liquid,'all_scored':items,'longs':sorted(liquid,key=lambda x:x['score'],reverse=True)[:int(config.get('long_count',3))],
                                'shorts':liquid[:int(config.get('short_count',3))]}
@@ -374,17 +397,20 @@ def calculate_scores(db: Session, config: dict):
         rows = []
         for item in items:
             pair = item['pair']
-            side, reason = 'NONE', 'Outside the strategy shortlist'
-            if product == 'spot' and pair in long_pairs:
+            if not item.get('strategy_eligible', True):
+                side, reason = 'EXCLUDED', item.get('exclusion_reason') or 'Excluded from strategy entries'
+            else:
+                side, reason = 'NONE', 'Outside the strategy shortlist'
+            if item.get('strategy_eligible', True) and product == 'spot' and pair in long_pairs:
                 if item.get('score', 0) > 0:
                     side, reason = 'LONG', 'Positive-score leader in the liquidity shortlist'
                 else:
                     side, reason = 'WATCH', 'Shortlist leader but score is not positive; spot is long-only'
-            elif product == 'futures' and pair in long_pairs:
+            elif item.get('strategy_eligible', True) and product == 'futures' and pair in long_pairs:
                 side, reason = 'LONG', 'Highest-score leader in the futures shortlist'
-            elif product == 'futures' and pair in short_pairs:
+            elif item.get('strategy_eligible', True) and product == 'futures' and pair in short_pairs:
                 side, reason = 'SHORT', 'Lowest-score laggard in the futures shortlist'
-            elif pair in liquid_pairs:
+            elif item.get('strategy_eligible', True) and pair in liquid_pairs:
                 side, reason = 'WATCH', 'In the liquidity shortlist but not selected by signal rank'
             rows.append({**item, 'signal': side, 'signal_reason': reason,
                          'liquid_shortlist': pair in liquid_pairs, 'strategy_rank': score_rank.get(pair)})
@@ -463,7 +489,7 @@ def run_paper_cycle(db: Session, force: bool = False):
         requested=diagnostics.get('requested_pairs',len(cfg.get('pair_universe',PAIR_UNIVERSE)))
         msg=(f'Strategy cycle skipped: no market produced enough completed 1-hour candles for 14-day scoring '
              f'({ready} pairs candle-ready across {requested} discovered pairs). Check candle readiness and API errors below.')
-        runtime=read_config(db,'runtime',{}); runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'skipped','message':msg,'diagnostics':diagnostics}
+        runtime=read_config(db,'runtime',{}); runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'skipped','message':msg,'diagnostics':diagnostics,'paper_engine_version':PAPER_ENGINE_VERSION}
         runtime['paper_cycle_status']='skipped'; runtime['paper_cycle_message']=msg; runtime['paper_cycle_attempted_at']=utcnow().isoformat(); write_config(db,'runtime',runtime)
         log_event(db,msg,'WARNING','strategy',diagnostics); db.commit()
         return {'ok':False,'message':msg,'diagnostics':diagnostics}
@@ -515,7 +541,7 @@ def run_paper_cycle(db: Session, force: bool = False):
                                  opened_at=utcnow(),strategy=STRATEGY_ID,trade_id=trade.id,last_mark_price=price,last_unrealized_pnl_inr=0,is_open=True))
     cfg['paper_last_cycle']=utcnow().isoformat(); cfg['last_error']=None; write_config(db,'strategy_config',cfg)
     runtime=read_config(db,'runtime',{})
-    runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'ok','scan_universe_count':runtime.get('scan_universe_count',0),'signals':{k:len(v.get('all_scored',[])) for k,v in products.items()},'opened_positions':len(viable),'selected_signals':len(selected),'eligible_signals':len(viable),'candle_diagnostics':diagnostics}
+    runtime['last_strategy_cycle']={'at':utcnow().isoformat(),'status':'ok','scan_universe_count':runtime.get('scan_universe_count',0),'signals':{k:len(v.get('all_scored',[])) for k,v in products.items()},'opened_positions':len(viable),'selected_signals':len(selected),'eligible_signals':len(viable),'candle_diagnostics':diagnostics,'paper_engine_version':PAPER_ENGINE_VERSION}
     runtime['paper_cycle_status']='completed'
     runtime['paper_cycle_message']=f'Cycle completed; scored {sum(len(v.get("all_scored",[])) for v in products.values())} pairs and opened {len(viable)} positions.'
     runtime['paper_cycle_attempted_at']=utcnow().isoformat(); write_config(db,'runtime',runtime)

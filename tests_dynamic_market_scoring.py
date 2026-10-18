@@ -27,11 +27,12 @@ def run():
             core.write_config(db,'runtime',runtime); db.commit()
             scores=core.calculate_scores(db,cfg)
             fetched={x[0] for x in FakeCoinDCX.seen}
-            assert fetched=={'B-OLD_USDT','B-NEW_USDT'}, fetched
-            assert scores['_diagnostics']['requested_pairs']==2, scores['_diagnostics']
-            assert scores['_diagnostics']['candle_ready_total']==2, scores['_diagnostics']
-            assert 'spot' in scores and len(scores['spot']['all_scored'])==2
-            print('DYNAMIC UNIVERSE REGRESSION PASSED: candle scorer fetched both legacy and discovered pairs and exposed coverage diagnostics.')
+            # Scoring must match the discovered market list shown in the UI; seed pairs are a fallback only.
+            assert fetched=={'B-NEW_USDT'}, fetched
+            assert scores['_diagnostics']['requested_pairs']==1, scores['_diagnostics']
+            assert scores['_diagnostics']['candle_ready_total']==1, scores['_diagnostics']
+            assert 'spot' in scores and len(scores['spot']['all_scored'])==1
+            print('DYNAMIC UNIVERSE REGRESSION PASSED: scoring matches the discovered universe and exposes coverage diagnostics.')
     finally:
         core.CoinDCXClient=old
         try: Path(_tmp.name).unlink()
