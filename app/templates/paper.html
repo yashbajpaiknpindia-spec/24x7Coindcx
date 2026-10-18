@@ -92,7 +92,7 @@
   const body=$('paper-scan-rows');if(!body)return;
   const rows=filteredRows();
   set('scan-results-meta',rows.length+' of '+allRows.length+' product checks shown · markets refreshed '+(window.paperScanLastRefresh||'not yet')+' · strategy scored '+(window.paperScanStrategyAt||'not yet'));
-  if(!rows.length){body.innerHTML='<tr><td colspan="11" class="empty">'+(allRows.length?'No scanned markets match this filter.':'No live market rows are available yet; see the diagnostic above.')+'</td></tr>';return;}
+  if(!rows.length){body.innerHTML='<tr><td colspan="12" class="empty">'+(allRows.length?'No scanned markets match this filter.':'No live market rows are available yet; see the diagnostic above.')+'</td></tr>';return;}
   body.innerHTML=rows.map(function(r){
    const signalClass=r.signal==='LONG'?'green':r.signal==='SHORT'?'red':'muted-chip';
    const gateClass=r.eligible?'green':'muted-chip';
