@@ -24,7 +24,7 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.5.0', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.6.0', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
@@ -277,7 +277,9 @@ def api_paper_status(request: Request):
             'paper_cycle_status':runtime.get('paper_cycle_status','waiting'),'paper_cycle_message':runtime.get('paper_cycle_message','No paper cycle has been recorded yet.'),
             'paper_cycle_attempted_at':runtime.get('paper_cycle_attempted_at'),'paper_last_cycle':cfg.get('paper_last_cycle'),
             'last_strategy_cycle':cycle,'candle_diagnostics':diag,'open_positions':db.scalar(select(func.count(PaperPosition.id)).where(PaperPosition.is_open==True)) or 0,
-            'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0}
+            'capital_constrained_open_positions':db.scalar(select(func.count(PaperModePosition.id)).where(PaperModePosition.is_open==True)) or 0,
+            'closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper',Trade.status=='closed')) or 0,
+            'capital_constrained_closed_trades':db.scalar(select(func.count(Trade.id)).where(Trade.run_mode=='paper_capital',Trade.status=='closed')) or 0}
 
 
 
