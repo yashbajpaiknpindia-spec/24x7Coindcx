@@ -35,6 +35,15 @@ def run():
     expanded_runtime['last_strategy_cycle']={'scan_universe_count':60,'paper_engine_version':PAPER_ENGINE_VERSION}
     due, req=paper_cycle_due(expanded_cfg,expanded_runtime,now)
     assert not due and req is None, (due,req)
+    # A new engine rule version triggers one immediate paper-only cycle even when
+    # the ordinary 15-minute retry cooldown has not elapsed.
+    changed_runtime={'scan_universe_count':60,'paper_cycle_attempted_at':(now-timedelta(minutes=2)).isoformat(),
+                     'last_strategy_cycle':{'scan_universe_count':60,'paper_engine_version':'old-version'}}
+    due, req=paper_cycle_due({'paper_last_cycle':today_cycle},changed_runtime,now)
+    assert due and req is None, (due,req)
+    changed_runtime['paper_engine_migration_attempted_version']=PAPER_ENGINE_VERSION
+    due, req=paper_cycle_due({'paper_last_cycle':today_cycle},changed_runtime,now)
+    assert not due and req is None, (due,req)
     # If no cycle ran today, a stale attempt is retried after cooldown.
     yesterday=(now-timedelta(days=1)).isoformat()
     stale_attempt=(now-timedelta(minutes=20)).isoformat()
