@@ -306,12 +306,22 @@ def api_paper_scan_results(request: Request):
                     eligible, eligibility_reason=False,'No market snapshot yet; waiting for a live scanner refresh'
                 position=open_map.get((product,pair))
                 trade=trade_map.get((product,pair))
+                signal=scored.get('signal','NO SCORE')
+                signal_reason=scored.get('signal_reason','Strategy has not produced a score for this market yet')
+                hurdle=_entry_cost_hurdle_pct(product,cfg,snap) if snap and signal in ('LONG','SHORT') and eligible else None
+                expected_move=float(scored.get('expected_move_pct') or 0)
+                required_move=max(float(cfg.get('min_expected_move_pct',0.75)),
+                                  (hurdle if hurdle is not None else 999.0)*float(cfg.get('cost_coverage_multiple',1.5)))
+                cost_eligible=bool(signal in ('LONG','SHORT') and hurdle is not None and expected_move >= required_move)
+                if signal in ('LONG','SHORT') and eligible and not cost_eligible:
+                    signal='WATCH'
+                    signal_reason=f'Blocked by cost gate: expected move {expected_move:.2f}% vs required {required_move:.2f}%; round-trip cost estimate {hurdle if hurdle is not None else "unknown"}%.'
                 if position:
                     paper_state='OPEN PAPER POSITION'
                 elif trade and trade.status=='closed':
                     paper_state='LAST TRADE CLOSED'
-                elif scored.get('signal') in ('LONG','SHORT'):
-                    paper_state='ELIGIBLE CANDIDATE' if eligible else 'BLOCKED BY LIQUIDITY GATE'
+                elif signal in ('LONG','SHORT'):
+                    paper_state='ELIGIBLE CANDIDATE' if eligible and cost_eligible else 'BLOCKED BY LIQUIDITY / COST GATE'
                 elif scored:
                     paper_state='WATCH / NO ENTRY'
                 else:
@@ -332,8 +342,12 @@ def api_paper_scan_results(request: Request):
                     'strategy_turnover_proxy':scored.get('turnover_proxy'),
                     'strategy_rank':scored.get('strategy_rank'),
                     'liquid_shortlist':bool(scored.get('liquid_shortlist',False)),
-                    'signal':scored.get('signal','NO SCORE'),
-                    'signal_reason':scored.get('signal_reason','Strategy has not produced a score for this market yet'),
+                    'signal':signal,
+                    'signal_reason':signal_reason,
+                    'expected_move_pct':expected_move if scored else None,
+                    'estimated_round_trip_cost_pct':hurdle,
+                    'required_move_pct':required_move if signal in ('LONG','SHORT') or scored else None,
+                    'cost_eligible':cost_eligible,
                     'paper_state':paper_state,
                     'paper_unrealized_pnl_inr':float(position.last_unrealized_pnl_inr or 0) if position else None,
                     'last_trade_status':trade.status if trade else None,
