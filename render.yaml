@@ -1,0 +1,123 @@
+envVarGroups:
+  - name: coindcx-api-secrets
+    envVars:
+      - key: COINDCX_API_KEY
+        sync: false
+      - key: COINDCX_API_SECRET
+        sync: false
+services:
+  - type: web
+    name: coindcx-strategy-terminal
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVarGroups:
+      - coindcx-api-secrets
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: coindcx-terminal-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: AUTO_LIVE_TRADING_ENABLED
+        value: "false"
+      - key: STARTING_CAPITAL_INR
+        value: "30000"
+      - key: INR_PER_USDT
+        value: "94.75"
+      - key: LIVE_MAX_LEVERAGE
+        value: "2"
+      - key: LIVE_MAX_ORDER_NOTIONAL_USDT
+        value: "25"
+      - key: LIVE_MAX_GROSS_EXPOSURE_USDT
+        value: "100"
+      - key: LIVE_MAX_DAILY_LOSS_INR
+        value: "500"
+      - key: LIVE_AUTO_CAPITAL_BUDGET_INR
+        value: "3000"
+      - key: LIVE_AUTO_MAX_ORDER_NOTIONAL_USDT
+        value: "10"
+      - key: LIVE_AUTO_MAX_GROSS_EXPOSURE_USDT
+        value: "50"
+      - key: LIVE_AUTO_MAX_DAILY_LOSS_INR
+        value: "500"
+      - key: LIVE_REQUIRE_ORDERBOOK_DEPTH
+        value: "true"
+      - key: LIVE_MIN_BOOK_DEPTH_USDT
+        value: "50"
+      - key: MARKET_DATA_POLL_SECONDS
+        value: "60"
+      - key: AUTO_START_PAPER
+        value: "true"
+      - key: SCAN_UNIVERSE_LIMIT
+        value: "60"
+      - key: PAPER_CYCLE_RETRY_SECONDS
+        value: "900"
+      - key: LIVE_FUTURES_TRADE_SYNC_SECONDS
+        value: "300"
+      - key: LIVE_FUTURES_TRADE_SYNC_DAYS
+        value: "3"
+      - key: LIVE_FUTURES_TRADES_MAX_PAGES_PER_PAIR
+        value: "5"
+  - type: worker
+    name: coindcx-strategy-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: python -m app.worker
+    envVarGroups:
+      - coindcx-api-secrets
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: coindcx-terminal-db
+          property: connectionString
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: AUTO_LIVE_TRADING_ENABLED
+        value: "false"
+      - key: STARTING_CAPITAL_INR
+        value: "30000"
+      - key: INR_PER_USDT
+        value: "94.75"
+      - key: LIVE_MAX_LEVERAGE
+        value: "2"
+      - key: LIVE_AUTO_CAPITAL_BUDGET_INR
+        value: "3000"
+      - key: LIVE_AUTO_MAX_ORDER_NOTIONAL_USDT
+        value: "10"
+      - key: LIVE_AUTO_MAX_GROSS_EXPOSURE_USDT
+        value: "50"
+      - key: LIVE_AUTO_MAX_DAILY_LOSS_INR
+        value: "500"
+      - key: LIVE_REQUIRE_ORDERBOOK_DEPTH
+        value: "true"
+      - key: LIVE_MIN_BOOK_DEPTH_USDT
+        value: "50"
+      - key: MARKET_DATA_POLL_SECONDS
+        value: "60"
+      - key: AUTO_START_PAPER
+        value: "true"
+      - key: SCAN_UNIVERSE_LIMIT
+        value: "60"
+      - key: PAPER_CYCLE_RETRY_SECONDS
+        value: "900"
+      - key: LIVE_FUTURES_TRADE_SYNC_SECONDS
+        value: "300"
+      - key: LIVE_FUTURES_TRADE_SYNC_DAYS
+        value: "3"
+      - key: LIVE_FUTURES_TRADES_MAX_PAGES_PER_PAIR
+        value: "5"
+databases:
+  - name: coindcx-terminal-db
+    databaseName: coindcx_terminal
+    user: coindcx_terminal
+    plan: basic-256mb

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · {{ app_name }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+</head><body>
+<div class="shell">
+<aside class="sidebar">
+  <a class="brand" href="/dashboard"><span class="brand-mark">CX</span><span><b>STRATEGY</b><small>TERMINAL <i>v1.4.1</i></small></span></a>
+  <div class="nav-label">WORKSPACE</div>
+  <nav>
+    {% set navitems=[('dashboard','/dashboard','◫','Overview'),('markets','/markets','⌁','Markets & liquidity'),('strategy','/strategy','⌘','Strategy lab'),('paper','/paper','◉','Paper trading'),('live','/live','↗','Live execution'),('backtests','/backtests','▥','Backtest archive'),('capital','/capital','₹','Capital deployment'),('ledger','/ledger','≋','Execution ledger'),('telemetry','/telemetry','◌','Data quality')] %}
+    {% for id,url,ico,label in navitems %}<a class="nav-item {% if page==id %}active{% endif %}" href="{{url}}"><span class="nav-icon">{{ico}}</span>{{label}}{% if id=='live' %}<span class="nav-state {% if live_trading_enabled %}state-amber{% else %}state-muted{% endif %}"></span>{% endif %}</a>{% endfor %}
+  </nav>
+  <div class="nav-label second-label">OPERATIONS</div><nav>
+    {% set ops=[('positions','/positions','⊞','Positions'),('orders','/orders','↕','Orders & fills'),('analytics','/analytics','⌁','Analytics'),('journal','/journal','≡','Audit journal'),('settings','/settings','⚙','Connections & settings')] %}
+    {% for id,url,ico,label in ops %}<a class="nav-item {% if page==id %}active{% endif %}" href="{{url}}"><span class="nav-icon">{{ico}}</span>{{label}}</a>{% endfor %}
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="engine-card"><div class="engine-head"><span class="live-dot"></span><b>ENGINE STATUS</b></div><div class="engine-title">{{ 'Paper engine on' if summary.config.paper_enabled else 'Paper engine paused' }}</div><div class="engine-sub">{{ summary.fresh_markets }} of {{ summary.market_count }} market snapshots fresh</div><div class="mini-meter"><span style="width:{{ (summary.fresh_markets / summary.market_count * 100)|round if summary.market_count else 0 }}%"></span></div></div>
+    <form action="/logout" method="post"><button class="nav-item logout" type="submit"><span class="nav-icon">↪</span>Sign out</button></form>
+  </div>
+</aside>
+<main class="main">
+  <header class="topbar"><div class="top-left"><div class="eyebrow">COINDCX / RESEARCH & EXECUTION</div><h1>{{ title }}</h1></div><div class="top-right"><div class="mode-pill"><span class="live-dot"></span>PAPER DEFAULT</div><div class="live-pill {% if live_trading_enabled %}enabled{% endif %}"><span></span>LIVE {{ 'ENABLED BY ENV' if live_trading_enabled else 'LOCKED' }}</div><div class="avatar">AD</div></div></header>
+  <div class="content">
+  {% block content %}{% endblock %}
+  <footer class="footer"><span>CoinDCX Strategy Terminal · Research build 1.4.1</span><span>Market data and execution depend on CoinDCX API availability.</span></footer>
+  </div>
+</main></div>
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+<script>window.addEventListener('DOMContentLoaded',()=>{const p=new URLSearchParams(location.search);let msg='';if(p.has('started'))msg='Paper engine enabled';if(p.has('paused'))msg='Paper engine paused';if(p.has('cycle'))msg='Paper rebalance requested';if(p.has('cycle_error'))msg='Cycle skipped — check strategy logs';if(p.has('refreshed'))msg='Market snapshots refreshed';if(p.has('partial'))msg='Refresh completed with partial API errors';if(p.has('saved'))msg='Strategy settings saved';if(p.has('armed'))msg='Live mode armed. Manual order ticket still requires per-order confirmation.';if(p.has('disarmed'))msg='Live mode disarmed';if(p.has('submitted'))msg='Order request accepted by API. Verify actual order status in CoinDCX.';if(p.has('test'))msg=p.get('test')==='ok'?'CoinDCX authentication test passed':'CoinDCX authentication test failed';if(p.has('imported'))msg='Imported '+p.get('imported')+' backtest rows';if(p.has('blocked'))msg='Action blocked: '+p.get('blocked')+'. See live page requirements and audit journal.';if(msg&&window.showToast)window.showToast(msg);});</script>
+</body></html>

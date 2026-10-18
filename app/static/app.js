@@ -1,0 +1,3 @@
+function showToast(message){const el=document.getElementById('toast');if(!el)return;el.textContent=message;el.classList.add('visible');setTimeout(()=>el.classList.remove('visible'),3600)}
+function moneyINR(v){return '₹'+Number(v||0).toLocaleString('en-IN',{maximumFractionDigits:2})}
+async function refreshDash(){try{const r=await fetch('/api/dashboard');if(!r.ok)return;const d=await r.json();document.querySelectorAll('[data-refresh-key]').forEach(el=>{const parts=el.dataset.refreshKey.split('.');let v=d;parts.forEach(p=>v=v?.[p]);if(v!==undefined)el.textContent=v;})}catch(e){/* dashboard is still useful without auto-refresh */}}
