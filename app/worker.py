@@ -2,7 +2,7 @@
 import os, time, traceback
 from datetime import datetime, timezone, timedelta
 from .db import Base, engine, SessionLocal
-from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, calculate_scores, run_paper_cycle, log_event
+from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, calculate_scores, run_paper_cycle, log_event, PAPER_ENGINE_VERSION
 from .coindcx import CoinDCXClient
 from .live_engine import reconcile_live_account, collect_market_telemetry, run_auto_live_cycle
 
@@ -50,7 +50,8 @@ def paper_cycle_due(cfg, runtime, now=None):
     except (TypeError, ValueError):
         latest_universe_count=last_universe_count=0
     universe_changed=(latest_universe_count > 0 and latest_universe_count > last_universe_count)
-    return bool(request_pending or ((daily_due or universe_changed) and retry_ready)), (request if request_pending else None)
+    engine_changed=last_cycle.get('paper_engine_version') != PAPER_ENGINE_VERSION
+    return bool(request_pending or ((daily_due or universe_changed or engine_changed) and retry_ready)), (request if request_pending else None)
 
 
 def main():
