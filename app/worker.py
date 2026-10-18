@@ -40,7 +40,17 @@ def paper_cycle_due(cfg, runtime, now=None):
     request_pending=bool(request and request != runtime.get('paper_request_handled_at'))
     daily_due=(cycle_at is None or cycle_at.date() != now.date())
     retry_ready=(attempt_at is None or (now-attempt_at).total_seconds() >= PAPER_RETRY_SECONDS)
-    return bool(request_pending or (daily_due and retry_ready)), (request if request_pending else None)
+    # A wider or changed discovered universe is new research input. Rebalance paper
+    # once against it even if today's earlier run used only the old seed universe;
+    # recording the new count in last_strategy_cycle prevents repeat rebalance loops.
+    last_cycle=runtime.get('last_strategy_cycle') or {}
+    try:
+        latest_universe_count=int(runtime.get('scan_universe_count') or 0)
+        last_universe_count=int(last_cycle.get('scan_universe_count') or 0)
+    except (TypeError, ValueError):
+        latest_universe_count=last_universe_count=0
+    universe_changed=(latest_universe_count > 0 and latest_universe_count > last_universe_count)
+    return bool(request_pending or ((daily_due or universe_changed) and retry_ready)), (request if request_pending else None)
 
 
 def main():
