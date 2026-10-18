@@ -24,7 +24,7 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.4.5', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.5.0', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
