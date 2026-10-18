@@ -21,6 +21,28 @@
  <div class="panel-note" id="candle-errors-detail">{% for err in runtime.get('paper_candle_diagnostics',{}).get('fetch_errors',[]) %}{{err}}{% if not loop.last %} · {% endif %}{% endfor %}</div>
 </section>
 
+
+<section class="panel scan-results-panel" id="live-scan-results">
+ <div class="panel-head"><div><div class="eyebrow">LIVE COINDCX SCAN</div><h3>Scanned markets, liquidity checks & strategy opportunities</h3><p class="muted">Up to 60 USDT pairs by default. Prices/order-book checks refresh about every 60 seconds; strategy scores refresh every 15 minutes; portfolio rebalance remains daily. Ranked by reported spot volume × last price, not market capitalization. A liquidity pass is not a fill guarantee.</p></div><span id="scan-live-state" class="status-chip muted-chip">WAITING FOR DATA</span></div>
+ <div class="stat-grid four scan-mini-stats">
+  <div class="stat-card"><div class="stat-top"><span>Markets in scan</span></div><div class="stat-value" id="scan-summary-markets">—</div><div class="stat-foot">Unique USDT pairs</div></div>
+  <div class="stat-card"><div class="stat-top"><span>Liquidity gate passes</span></div><div class="stat-value" id="scan-summary-liquid">—</div><div class="stat-foot">Markets passing current screening</div></div>
+  <div class="stat-card"><div class="stat-top"><span>Strategy opportunities</span></div><div class="stat-value" id="scan-summary-opportunities">—</div><div class="stat-foot"><span id="scan-summary-eligible-opps">—</span> also pass liquidity</div></div>
+  <div class="stat-card"><div class="stat-top"><span>Candle-ready checks</span></div><div class="stat-value" id="scan-summary-candles">—</div><div class="stat-foot">Product/pair records scored</div></div>
+ </div>
+ <div class="scan-toolbar"><div class="button-row scan-filter-row">
+  <button class="btn btn-primary scan-filter" type="button" data-scan-filter="all">All scanned</button>
+  <button class="btn btn-quiet scan-filter" type="button" data-scan-filter="eligible">Liquidity pass</button>
+  <button class="btn btn-quiet scan-filter" type="button" data-scan-filter="opportunities">Opportunities</button>
+  <button class="btn btn-quiet scan-filter" type="button" data-scan-filter="spot">Spot</button>
+  <button class="btn btn-quiet scan-filter" type="button" data-scan-filter="futures">Futures</button>
+ </div><input id="scan-search" class="scan-search" type="search" placeholder="Filter by coin or pair…" aria-label="Filter scanned markets"></div>
+ <div class="panel-note" id="scan-results-meta">Waiting for the first successful live CoinDCX market refresh…</div>
+ <div class="panel-note" id="scan-results-error" hidden></div>
+ <div class="table-wrap scan-table-wrap"><table id="paper-scan-table"><thead><tr><th>Rank</th><th>Pair</th><th>Product</th><th>Last price</th><th>24h turnover proxy</th><th>Spread</th><th>History</th><th>Strategy score / momentum</th><th>Signal</th><th>Liquidity gate</th><th>Paper status</th></tr></thead><tbody id="paper-scan-rows"><tr><td colspan="11" class="empty">No live scan results fetched yet. The table will show why if the API or worker is unavailable.</td></tr></tbody></table></div>
+ <div class="panel-note">Signals come from the last completed candle-scoring cycle. Prices and liquidity gates come from the latest market refresh. Check timestamps before interpreting an opportunity.</div>
+</section>
+
 <div class="stat-grid four"><div class="stat-card"><div class="stat-top"><span>Paper equity</span><span class="stat-icon">₹</span></div><div class="stat-value">₹{{'{:,.2f}'.format(equity.equity_inr)}}</div><div class="stat-foot">Starting ₹{{'{:,.0f}'.format(equity.starting_capital_inr)}}</div></div><div class="stat-card"><div class="stat-top"><span>Realized P&L</span><span class="stat-icon">↗</span></div><div class="stat-value {{'positive' if equity.realized_pnl_inr>=0 else 'negative'}}">₹{{'{:,.2f}'.format(equity.realized_pnl_inr)}}</div><div class="stat-foot">Closed simulated trades net of assumed costs</div></div><div class="stat-card"><div class="stat-top"><span>Open P&L</span><span class="stat-icon">⌁</span></div><div class="stat-value {{'positive' if equity.unrealized_pnl_inr>=0 else 'negative'}}">₹{{'{:,.2f}'.format(equity.unrealized_pnl_inr)}}</div><div class="stat-foot">Current mark estimate; not an exchange fill</div></div><div class="stat-card"><div class="stat-top"><span>Paper engine</span><span class="stat-icon">◉</span></div><div class="stat-value">{{'ON' if cfg.paper_enabled else 'OFF'}}</div><div class="stat-foot">Last cycle {{cfg.paper_last_cycle[:16] if cfg.paper_last_cycle else 'not run'}} · live universe {{runtime.get('scan_universe_count', 'loading')}} markets</div></div></div>
 <div class="stat-grid four"><div class="stat-card"><div class="stat-top"><span>Closed trades</span><span class="stat-icon">#</span></div><div class="stat-value">{{paper_stats.closed}}</div><div class="stat-foot">Completed paper trades</div></div><div class="stat-card"><div class="stat-top"><span>Win rate</span><span class="stat-icon">%</span></div><div class="stat-value">{{'%.1f%%'|format(paper_stats.win_rate) if paper_stats.win_rate is not none else '—'}}</div><div class="stat-foot">Net profitable closed trades</div></div><div class="stat-card"><div class="stat-top"><span>Profit factor</span><span class="stat-icon">↗</span></div><div class="stat-value">{{'%.2f'|format(paper_stats.profit_factor) if paper_stats.profit_factor is not none else '—'}}</div><div class="stat-foot">Gross winners ÷ absolute losers</div></div><div class="stat-card"><div class="stat-top"><span>Closed net P&amp;L</span><span class="stat-icon">₹</span></div><div class="stat-value {{'positive' if paper_stats.net_pnl_inr>=0 else 'negative'}}">₹{{'{:,.2f}'.format(paper_stats.net_pnl_inr)}}</div><div class="stat-foot">After simulated fees/slippage/funding fields</div></div></div>
 <section class="panel"><div class="panel-head"><div><div class="eyebrow">OPEN PAPER POSITIONS</div><h3>Current portfolio</h3></div><span class="tag">{{positions|length}} positions</span></div><div class="table-wrap"><table><thead><tr><th>Product</th><th>Pair</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th><th>Notional</th><th>Unrealized P&L</th></tr></thead><tbody>{% for p in positions %}<tr><td>{{p.product|upper}}</td><td><b>{{p.pair}}</b></td><td><span class="side-tag {{'long' if p.side=='buy' else 'short'}}">{{p.side|upper}}</span></td><td class="mono">{{'%.6f'|format(p.quantity)}}</td><td class="mono">{{'%.5f'|format(p.entry_price)}}</td><td class="mono">{{'%.5f'|format(p.last_mark_price) if p.last_mark_price else '—'}}</td><td class="mono">${{'{:,.2f}'.format(p.notional_usdt)}}</td><td class="mono {{'positive' if p.last_unrealized_pnl_inr>=0 else 'negative'}}">₹{{'{:,.2f}'.format(p.last_unrealized_pnl_inr)}}</td><td class="mono">{% if p.product=='futures' and p.leverage>1 %}{{'%.5f'|format(p.entry_price*(1-(1/p.leverage)+0.005 if p.side=='buy' else 1+(1/p.leverage)-0.005))}}{% else %}N/A{% endif %}</td><td class="mono">{% if p.product=='futures' and p.leverage>1 and p.last_mark_price %}{{'%.1f%%'|format((abs(p.last_mark_price-p.entry_price*(1-(1/p.leverage)+0.005 if p.side=='buy' else 1+(1/p.leverage)-0.005))/p.last_mark_price)*100)}}{% else %}N/A{% endif %}</td></tr>{% endfor %}{% if not positions %}<tr><td colspan="10" class="empty">No open paper positions. Start engine, refresh market data, and run a cycle.</td></tr>{% endif %}</tbody></table></div></section>
@@ -45,5 +67,90 @@
  }catch(e){/* Keep last known telemetry visible if the status call is temporarily unavailable. */}}
  await poll(); window.setInterval(poll,10000);
 })();
+
+
+(async function paperScanResultsLoop(){
+ const $=id=>document.getElementById(id);
+ let allRows=[], activeFilter='all', searchText='';
+ const esc=value=>String(value===null||value===undefined?'':value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+ const num=(v,d)=>v===null||v===undefined||!Number.isFinite(Number(v))?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:d===undefined?2:d,minimumFractionDigits:0});
+ const price=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:Number(v)<1?8:4});
+ const compact=v=>v===null||v===undefined?'—':'
++Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:2}).format(Number(v));
+ function set(id,v){if($(id))$(id).textContent=String(v===null||v===undefined?'—':v);}
+ function stateChip(text,good){const el=$('scan-live-state');if(el){el.textContent=text;el.className='status-chip '+(good?'green':'muted-chip');}}
+ function filteredRows(){return allRows.filter(r=>{
+   if(activeFilter==='eligible'&&!r.eligible)return false;
+   if(activeFilter==='opportunities'&&!['LONG','SHORT'].includes(r.signal))return false;
+   if(activeFilter==='spot'&&r.product!=='spot')return false;
+   if(activeFilter==='futures'&&r.product!=='futures')return false;
+   if(searchText&&!(String(r.pair)+' '+String(r.product)).toLowerCase().includes(searchText))return false;
+   return true;
+ });}
+ function renderRows(){
+  const body=$('paper-scan-rows');if(!body)return;
+  const rows=filteredRows();
+  set('scan-results-meta',rows.length+' of '+allRows.length+' product checks shown · markets refreshed '+(window.paperScanLastRefresh||'not yet')+' · strategy scored '+(window.paperScanStrategyAt||'not yet'));
+  if(!rows.length){body.innerHTML='<tr><td colspan="11" class="empty">'+(allRows.length?'No scanned markets match this filter.':'No live market rows are available yet; see the diagnostic above.')+'</td></tr>';return;}
+  body.innerHTML=rows.map(function(r){
+   const signalClass=r.signal==='LONG'?'green':r.signal==='SHORT'?'red':'muted-chip';
+   const gateClass=r.eligible?'green':'muted-chip';
+   const score=r.strategy_score===null||r.strategy_score===undefined?'—':num(r.strategy_score,3)+' / '+(r.momentum_pct===null||r.momentum_pct===undefined?'—':(Number(r.momentum_pct)>0?'+':'')+num(r.momentum_pct,2)+'%');
+   const hist=r.candle_ready?'<span class="status-chip green">READY</span>':'<span class="status-chip muted-chip">NOT SCORED</span>';
+   const gateTitle=esc(r.eligibility_reason||'No eligibility detail');
+   const signalTitle=esc(r.signal_reason||'No strategy detail');
+   const stateClass=r.paper_state==='OPEN PAPER POSITION'?'green':r.paper_state==='BLOCKED BY LIQUIDITY GATE'?'red':'muted-chip';
+   const age=r.snapshot_age_seconds===null||r.snapshot_age_seconds===undefined?'—':num(r.snapshot_age_seconds,0)+'s old';
+   let html='<tr><td class="mono">'+esc(r.rank)+'</td><td><b>'+esc(r.pair)+'</b><div class="muted">'+esc(age)+'</div></td><td>'+esc(String(r.product||'').toUpperCase())+'</td>';
+   html+='<td class="mono">'+esc(price(r.last_price))+'</td><td class="mono" title="'+esc(r.liquidity_source||'Turnover source unavailable')+'">'+esc(compact(r.turnover_usdt_proxy))+'</td>';
+   html+='<td class="mono">'+(r.spread_bps===null||r.spread_bps===undefined?'—':esc(num(r.spread_bps,1)+' bps'))+'</td><td>'+hist+'</td>';
+   html+='<td class="mono" title="'+signalTitle+'">'+esc(score)+'</td><td><span class="status-chip '+signalClass+'">'+esc(r.signal||'NO SCORE')+'</span></td>';
+   html+='<td><span class="status-chip '+gateClass+'" title="'+gateTitle+'">'+(r.eligible?'PASS':'BLOCKED')+'</span><div class="muted scan-reason">'+gateTitle+'</div></td>';
+   html+='<td><span class="status-chip '+stateClass+'">'+esc(r.paper_state||'UNKNOWN')+'</span>';
+   if(r.paper_unrealized_pnl_inr!==null&&r.paper_unrealized_pnl_inr!==undefined)html+='<div class="muted">uPnL ₹'+esc(num(r.paper_unrealized_pnl_inr))+'</div>';
+   if(r.last_trade_net_pnl_inr!==null&&r.last_trade_net_pnl_inr!==undefined)html+='<div class="muted">last trade ₹'+esc(num(r.last_trade_net_pnl_inr))+'</div>';
+   return html+'</td></tr>';
+  }).join('');
+ }
+ async function poll(){
+  try{
+   const response=await fetch('/api/paper-scan-results',{cache:'no-store',credentials:'same-origin'});
+   if(response.status===401){stateChip('LOGIN REQUIRED',false);$('scan-results-error').hidden=false;$('scan-results-error').textContent='Your session expired. Sign in again to view live markets and strategy opportunities.';allRows=[];renderRows();return;}
+   if(!response.ok)throw new Error('scan API returned HTTP '+response.status);
+   const d=await response.json();allRows=Array.isArray(d.rows)?d.rows:[];
+   const sm=d.summary||{};
+   set('scan-summary-markets',sm.unique_markets===undefined?0:sm.unique_markets);
+   set('scan-summary-liquid',sm.unique_markets_with_any_pass===undefined?0:sm.unique_markets_with_any_pass);
+   set('scan-summary-opportunities',sm.strategy_opportunities===undefined?0:sm.strategy_opportunities);
+   set('scan-summary-eligible-opps',sm.eligible_opportunities===undefined?0:sm.eligible_opportunities);
+   set('scan-summary-candles',sm.candle_ready_records===undefined?0:sm.candle_ready_records);
+   const err=$('scan-results-error'),workerAge=d.worker_heartbeat_age_seconds;
+   const workerOnline=workerAge!==null&&workerAge!==undefined&&workerAge<150;
+   const refreshAge=d.last_market_refresh?Math.max(0,(Date.now()-new Date(d.last_market_refresh).getTime())/1000):null;
+   window.paperScanLastRefresh=d.last_market_refresh?new Date(d.last_market_refresh).toLocaleString():'not yet';
+   window.paperScanStrategyAt=d.strategy_as_of?new Date(d.strategy_as_of).toLocaleString():'not scored yet';
+   if(d.market_refresh_error){err.hidden=false;err.textContent='CoinDCX market API partial failure: '+d.market_refresh_error;stateChip(workerOnline?'API WARNING':'WORKER OFFLINE',false);}
+   else if(!workerOnline){err.hidden=false;err.textContent='The background-worker heartbeat is missing or stale. Start only queues a cycle; without the worker, markets cannot refresh or candles score. Check the coindcx-strategy-worker service and its shared database.';stateChip('WORKER OFFLINE / STALE',false);}
+   else if(!d.last_market_refresh){err.hidden=false;err.textContent='Worker is online but no successful market refresh is recorded. Check worker logs for API, rate-limit, or database errors.';stateChip('WAITING FOR MARKET REFRESH',false);}
+   else if(!(sm.snapshots_present>0)){err.hidden=false;err.textContent='No usable live prices are stored. Check the CoinDCX public API response and snapshot persistence.';stateChip('NO MARKET DATA',false);}
+   else if(refreshAge===null||refreshAge>180){err.hidden=false;err.textContent='Market snapshots are stale ('+(refreshAge===null?'no timestamp':Math.round(refreshAge)+' seconds old')+'). Cached rows are not live prices.';stateChip('STALE MARKET DATA',false);}
+   else{err.hidden=true;err.textContent='';stateChip('LIVE SCAN DATA',true);}
+   renderRows();
+  }catch(e){stateChip('SCAN API ERROR',false);const err=$('scan-results-error');if(err){err.hidden=false;err.textContent='Could not load live scan rows: '+(e&&e.message?e.message:e)+'. Check the web logs, authentication, and database.';}allRows=[];renderRows();}
+ }
+ document.querySelectorAll('[data-scan-filter]').forEach(button=>button.addEventListener('click',function(){
+   activeFilter=button.dataset.scanFilter||'all';
+   document.querySelectorAll('[data-scan-filter]').forEach(b=>{b.className='btn '+(b===button?'btn-primary':'btn-quiet')+' scan-filter';});
+   renderRows();
+ }));
+ $('scan-search').addEventListener('input',function(event){searchText=String(event.target.value||'').toLowerCase().trim();renderRows();});
+ await poll();window.setInterval(poll,10000);
+})();
+
 </script>
+
+<style>
+.scan-results-panel .muted{color:var(--muted,#8492a6);font-size:.78rem}.scan-mini-stats{margin-top:14px}.scan-toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:18px 0 8px}.scan-filter-row{display:flex;gap:6px;flex-wrap:wrap}.scan-filter{padding:.5rem .7rem}.scan-search{min-width:220px;max-width:100%;padding:10px 12px;border:1px solid var(--line,#27344b);border-radius:8px;background:var(--panel,#111827);color:inherit}.scan-table-wrap{max-height:640px;overflow:auto}.scan-table-wrap table{min-width:1250px}.scan-table-wrap th{position:sticky;top:0;z-index:1;background:var(--panel,#111827)}.scan-reason{max-width:230px;white-space:normal;line-height:1.25;margin-top:3px}.scan-results-panel .panel-head p{margin:.45rem 0 0;max-width:760px;font-size:.86rem;color:var(--muted,#8492a6)}
+</style>
+
 {% endblock %}
