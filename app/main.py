@@ -331,14 +331,15 @@ def api_paper_rejection_audit(request: Request):
                 'outcome_4h_pct':a.outcome_4h_pct,'net_outcome_4h_pct':a.net_outcome_4h_pct,'evaluated_4h':a.evaluated_4h,
                 'outcome_24h_pct':a.outcome_24h_pct,'net_outcome_24h_pct':a.net_outcome_24h_pct,'evaluated_24h':a.evaluated_24h})
         summary={}
+        recent_ids=select(PaperDecisionAudit.id).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000).subquery()
         for mode in ('unrestricted','capital_constrained'):
-            base=select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.mode==mode,PaperDecisionAudit.decision=='rejected')
+            base=select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.mode==mode,PaperDecisionAudit.decision=='rejected')
             summary[mode+'_rejected']=db.scalar(base) or 0
         summary['rejected_would_win_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
-            PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct>0)) or 0
+            PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct>0)) or 0
         summary['rejected_correct_1h']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(
-            PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct<=0)) or 0
-        summary['total_decisions']=db.scalar(select(func.count(PaperDecisionAudit.id))) or 0
+            PaperDecisionAudit.id.in_(select(recent_ids.c.id)),PaperDecisionAudit.decision=='rejected',PaperDecisionAudit.evaluated_1h==True,PaperDecisionAudit.net_outcome_1h_pct<=0)) or 0
+        summary['total_decisions']=db.scalar(select(func.count(PaperDecisionAudit.id)).where(PaperDecisionAudit.id.in_(select(recent_ids.c.id)))) or 0
         return {'count':len(payload),'total_decisions':summary['total_decisions'],'summary':summary,'retention_days':90,'decisions':payload}
 
 @app.get('/api/system-health')
