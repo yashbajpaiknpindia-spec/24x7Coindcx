@@ -8,7 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
@@ -185,6 +185,28 @@ def paper_page(request: Request):
         capital_trades=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital').order_by(desc(Trade.created_at)).limit(100)).all()
         capital_closed=db.scalars(select(Trade).where(Trade.run_mode=='paper_capital',Trade.status=='closed')).all()
         observation_count=db.scalar(select(func.count(MarketObservation.id))) or 0
+        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000)).all()
+        recent_audits=audits[:100]
+        audit_stats={}
+        for mode in ('unrestricted','capital_constrained'):
+            group=[a for a in audits if a.mode==mode]
+            rejected=[a for a in group if a.decision=='rejected']
+            accepted=[a for a in group if a.decision=='accepted']
+            data={'decisions':len(group),'rejected':len(rejected),'accepted':len(accepted),'reasons':{}}
+            for a in rejected:
+                reason=(a.rejection_reason or 'unspecified').split(':',1)[0][:100]
+                data['reasons'][reason]=data['reasons'].get(reason,0)+1
+            for horizon in ('1h','4h','24h'):
+                flag='evaluated_'+horizon; net='net_outcome_'+horizon+'_pct'
+                evaluated=[a for a in rejected if getattr(a,flag)]
+                false_rejections=[a for a in evaluated if getattr(a,net) is not None and getattr(a,net)>0]
+                right_rejections=[a for a in evaluated if getattr(a,net) is not None and getattr(a,net)<=0]
+                accepted_eval=[a for a in accepted if getattr(a,flag) and getattr(a,net) is not None]
+                data[horizon]={'evaluated_rejections':len(evaluated),'would_win':len(false_rejections),
+                    'likely_correct':len(right_rejections),'false_rejection_rate_pct':100*len(false_rejections)/len(evaluated) if evaluated else None,
+                    'accepted_evaluated':len(accepted_eval),'accepted_wins':sum(1 for a in accepted_eval if getattr(a,net)>0),
+                    'accepted_net_avg_pct':sum(getattr(a,net) for a in accepted_eval)/len(accepted_eval) if accepted_eval else None}
+            audit_stats[mode]=data
     now_utc=datetime.now(timezone.utc)
     fx=float(cfg.get('inr_per_usdt',94.75))
     for p in positions:
@@ -228,7 +250,7 @@ def paper_page(request: Request):
         'profit_factor':(capital_gain/capital_losses if capital_losses>0 else None),'net_pnl_inr':capital_net,
         'open':len(capital_positions),'reserved_margin_inr':capital_reserved,'capital_inr':float(cfg.get('starting_capital_inr',30000)),
         'available_margin_inr':max(0.0,float(cfg.get('starting_capital_inr',30000))-capital_reserved)}
-    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats,capital_positions=capital_positions,capital_trades=capital_trades,capital_stats=capital_stats,observation_count=observation_count))
+    return templates.TemplateResponse('paper.html',context(request,'paper','Paper Trading',cfg=cfg,runtime=runtime,equity=eq,positions=positions,trades=trades,paper_stats=stats,capital_positions=capital_positions,capital_trades=capital_trades,capital_stats=capital_stats,observation_count=observation_count,audit_stats=audit_stats,recent_audits=recent_audits))
 
 @app.post('/paper/start')
 def paper_start(request: Request):
@@ -283,6 +305,22 @@ def api_paper_status(request: Request):
 
 
 
+
+
+@app.get('/api/paper-rejection-audit')
+def api_paper_rejection_audit(request: Request):
+    if not authed(request): return JSONResponse({'error':'login_required'}, status_code=401)
+    with SessionLocal() as db:
+        audits=db.scalars(select(PaperDecisionAudit).order_by(desc(PaperDecisionAudit.decision_at)).limit(10000)).all()
+        payload=[]
+        for a in audits:
+            payload.append({'id':a.id,'at':a.decision_at.isoformat() if a.decision_at else None,'mode':a.mode,
+                'product':a.product,'pair':a.pair,'side':a.proposed_side,'decision':a.decision,'reason':a.rejection_reason,
+                'expected_move_pct':a.expected_move_pct,'estimated_cost_pct':a.estimated_cost_pct,
+                'outcome_1h_pct':a.outcome_1h_pct,'net_outcome_1h_pct':a.net_outcome_1h_pct,'evaluated_1h':a.evaluated_1h,
+                'outcome_4h_pct':a.outcome_4h_pct,'net_outcome_4h_pct':a.net_outcome_4h_pct,'evaluated_4h':a.evaluated_4h,
+                'outcome_24h_pct':a.outcome_24h_pct,'net_outcome_24h_pct':a.net_outcome_24h_pct,'evaluated_24h':a.evaluated_24h})
+        return {'count':len(payload),'retention_days':90,'decisions':payload}
 
 @app.get('/api/system-health')
 def api_system_health(request: Request):
