@@ -228,3 +228,33 @@ class MarketObservation(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=False)
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (Index('idx_observation_product_pair_time', 'product', 'pair', 'observed_at'),)
+
+
+class PaperDecisionAudit(Base):
+    """Accepted/rejected signal decision plus shadow outcome at fixed horizons."""
+    __tablename__ = 'paper_decision_audits'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    product: Mapped[str] = mapped_column(String(16), index=True)
+    pair: Mapped[str] = mapped_column(String(40), index=True)
+    proposed_side: Mapped[str] = mapped_column(String(8), default='none')
+    decision: Mapped[str] = mapped_column(String(12), index=True)  # accepted / rejected / watch
+    rejection_reason: Mapped[str] = mapped_column(String(300), default='')
+    reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_move_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_cost_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_24h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_72h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_1h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_4h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_24h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_outcome_1h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_outcome_4h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_outcome_24h_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    evaluated_1h: Mapped[bool] = mapped_column(Boolean, default=False)
+    evaluated_4h: Mapped[bool] = mapped_column(Boolean, default=False)
+    evaluated_24h: Mapped[bool] = mapped_column(Boolean, default=False)
+    __table_args__ = (Index('idx_decision_audit_pair_time', 'product', 'pair', 'decision_at'),)
