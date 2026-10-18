@@ -181,6 +181,22 @@ def paper_page(request: Request):
         positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True).order_by(desc(PaperPosition.opened_at))).all()
         trades=db.scalars(select(Trade).where(Trade.run_mode=='paper').order_by(desc(Trade.created_at)).limit(100)).all()
         closed=db.scalars(select(Trade).where(Trade.run_mode=='paper',Trade.status=='closed')).all()
+    now_utc=datetime.now(timezone.utc)
+    fx=float(cfg.get('inr_per_usdt',94.75))
+    for p in positions:
+        opened=p.opened_at.replace(tzinfo=timezone.utc) if p.opened_at.tzinfo is None else p.opened_at.astimezone(timezone.utc)
+        p.held_minutes=max(0,(now_utc-opened).total_seconds()/60)
+        p.invested_usdt=float(p.notional_usdt or abs(p.quantity*p.entry_price))
+        p.invested_inr=p.invested_usdt*fx
+        p.estimated_margin_inr=p.invested_inr/max(float(p.leverage or 1),1.0) if p.product=='futures' else p.invested_inr
+        stop=float(cfg.get('stop_loss_move_pct',0.75))/100
+        p.stop_price=p.entry_price*(1-stop if p.side=='buy' else 1+stop)
+    for t in trades:
+        opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
+        ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
+        t.held_minutes=max(0,(ended-opened).total_seconds()/60)
+        t.invested_usdt=abs(float(t.quantity or 0)*float(t.entry_price or 0))
+        t.invested_inr=t.invested_usdt*fx
     wins=sum(1 for t in closed if (t.net_pnl_inr or 0)>0)
     losses=sum(1 for t in closed if (t.net_pnl_inr or 0)<0)
     stats={'closed':len(closed),'wins':wins,'losses':losses,'win_rate':(100*wins/len(closed) if closed else None),
