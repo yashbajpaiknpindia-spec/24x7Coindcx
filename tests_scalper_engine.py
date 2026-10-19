@@ -194,7 +194,7 @@ def run():
             # Validation gate: when no strategy has passed the 30-day blind
             # acceptance test, candidate scanning remains active but new paper
             # entries are blocked in both lanes; existing positions still exit.
-            shadow_now = now + timedelta(seconds=30)
+            shadow_now = now + timedelta(minutes=5)
             db.add(MarketSnapshot(
                 product="futures", pair="B-NEW_USDT", last_price=101.0,
                 bid=100.99, ask=101.01, quote_turnover_usdt=50_000_000,
