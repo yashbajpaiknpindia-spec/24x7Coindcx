@@ -114,15 +114,21 @@ def initialize_defaults(db: Session):
             strategy_cfg['scalper_spot_tax_pct']=31.2
         strategy_cfg['scalper_spot_tax_default_version']='30pct-plus-cess-v1'
         changed=True
-    # One-time shift from the hard 0.25% move gate to net-target-aware screening.
-    if strategy_cfg.get('scalper_logic_version') != 'net-target-v2':
+    # One-time upgrades migrate only untouched prior defaults, never user-customized values.
+    if strategy_cfg.get('scalper_logic_version') != 'persistence-v3':
         if float(strategy_cfg.get('scalper_min_signal_move_pct', 0.25) or 0) == 0.25:
             strategy_cfg['scalper_min_signal_move_pct'] = 0.05
+            changed = True
+        if float(strategy_cfg.get('scalper_min_turnover_usdt', 250000) or 0) == 1_000_000.0:
+            strategy_cfg['scalper_min_turnover_usdt'] = 250_000.0
+            changed = True
+        if float(strategy_cfg.get('scalper_max_spread_bps', 8) or 0) == 5.0:
+            strategy_cfg['scalper_max_spread_bps'] = 8.0
             changed = True
         if strategy_cfg.get('scalper_spot_tax_default_version') != 'custom' and float(strategy_cfg.get('scalper_futures_tax_pct', 30) or 0) == 30.0:
             strategy_cfg['scalper_futures_tax_pct'] = 31.2
             changed = True
-        strategy_cfg['scalper_logic_version'] = 'net-target-v2'
+        strategy_cfg['scalper_logic_version'] = 'persistence-v3'
         changed = True
     if changed:
         write_config(db, 'strategy_config', strategy_cfg)
