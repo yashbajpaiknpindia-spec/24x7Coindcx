@@ -615,7 +615,7 @@ def scalper_review_page(request: Request):
         cfg=read_config(db,'strategy_config',{})
         fx=float(cfg.get('inr_per_usdt',94.75))
         closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(200)).all()
-        scans=db.scalars(select(ScalpScanSnapshot).order_by(desc(ScalpScanSnapshot.scanned_at)).limit(24)).all()
+        scans=db.scalars(select(ScalpScanSnapshot).order_by(desc(ScalpScanSnapshot.scanned_at)).limit(400)).all()
         lane_stats={}
         loss_rows=[]
         for mode in ('research','capital'):
@@ -655,12 +655,18 @@ def scalper_review_page(request: Request):
         for obs in obs_rows:
             obs_by_pair.setdefault((obs.product,obs.pair),[]).append(obs)
         rejected=[]
+        full_coverage_snapshots=0
+        legacy_truncated_snapshots=0
         for snap in scans:
             at=_as_utc(snap.scanned_at)
             if not at: continue
             mode=snap.mode or 'research'
             try: candidates=json.loads(snap.candidates_json or '[]')
             except Exception: candidates=[]
+            if any(c.get('_audit_coverage') == 'full-universe-v1' for c in candidates):
+                full_coverage_snapshots += 1
+            else:
+                legacy_truncated_snapshots += 1
             mode_notional=float(cfg.get('scalper_capital_notional_usdt',30) if mode=='capital' else cfg.get('scalper_research_notional_usdt',100))
             mode_notional=min(mode_notional,(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10))/100)) if mode=='capital' else mode_notional
             for cand in candidates:
@@ -730,7 +736,8 @@ def scalper_review_page(request: Request):
         rejected.sort(key=lambda x:max(x['net5'] if x['net5'] is not None else -1e18,x['net10'] if x['net10'] is not None else -1e18),reverse=True)
         review_meta={'snapshots':len(scans),'candidates':raw_rejected_count,'episodes':len(rejected),
             'sampled':sum(1 for x in rejected if x['net5'] is not None or x['net10'] is not None),
-            'positive_rejected':target_first,'positive_samples':positive_samples,'scan_start':scan_cutoff}
+            'positive_rejected':target_first,'positive_samples':positive_samples,'full_coverage_snapshots':full_coverage_snapshots,
+            'legacy_truncated_snapshots':legacy_truncated_snapshots,'scan_start':scan_cutoff}
     return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
         cfg=cfg,lane_stats=lane_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
 
