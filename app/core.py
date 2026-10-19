@@ -1208,13 +1208,14 @@ def _record_scalper_scan(db: Session, now, mode, candidates):
             dt=dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
             if (now-dt).total_seconds()<240: return
         except Exception: pass
-    eligible=[x for x in candidates if x.get('eligible')][:15]
-    rejected=[x for x in candidates if not x.get('eligible') and x.get('return_5m_pct') is not None]
-    rejected.sort(key=lambda x:-(abs(float(x.get('return_5m_pct') or 0))/max(float(x.get('required_move_pct') or 0.01),0.01)))
     keys=('product','pair','price','bid','ask','entry_price_estimate','side','return_5m_pct','return_previous_5m_pct','return_10m_pct','expected_continuation_pct','turnover_usdt','spread_bps',
           'bid_depth_10_usdt','ask_depth_10_usdt','entry_depth_10_usdt','cost_hurdle_pct','required_move_pct',
           'estimated_net_pct','edge_multiple','eligible','reason')
-    payload=[{k:x.get(k) for k in keys} for x in eligible+rejected[:25]]
+    # Persist the full bounded universe, not only the 25 most extreme rejected
+    # candidates. Older snapshots are explicitly marked as truncated by absence
+    # of this audit marker; the retention policy below still bounds storage.
+    payload=[{**{k:x.get(k) for k in keys},'_audit_coverage':'full-universe-v1',
+              '_universe_count':len(candidates)} for x in candidates]
     db.add(ScalpScanSnapshot(scanned_at=now,mode=mode,candidates_json=json.dumps(payload,separators=(',',':'),default=str)))
     db.flush()
     old_ids=db.scalars(select(ScalpScanSnapshot.id).where(ScalpScanSnapshot.mode==mode)
