@@ -614,17 +614,43 @@ def scalper_review_page(request: Request):
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
         fx=float(cfg.get('inr_per_usdt',94.75))
+        # Detail table is capped, but cohort statistics use ALL closed trades so
+        # model-version PF/win-rate figures are not silently truncated or mixed.
+        closed_all=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at))).all()
         closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(200)).all()
         scans=db.scalars(select(ScalpScanSnapshot).order_by(desc(ScalpScanSnapshot.scanned_at)).limit(400)).all()
         lane_stats={}
         loss_rows=[]
         for mode in ('research','capital'):
-            lane=[t for t in closed if (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
+            lane=[t for t in closed_all if (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
             wins=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)>0]
             losses=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)<0]
             lane_stats[mode]={'closed':len(lane),'wins':len(wins),'losses':len(losses),
                 'net':sum(float(t.net_after_tax_inr or 0) for t in lane),
                 'pf':sum(wins)/abs(sum(losses)) if losses else None}
+        cohort_defs=[
+            ('0.1.0-paper-fast-scalper','research','Legacy v0.1 · research'),
+            ('0.2.0-dual-paper-tracks-cost-aware','research','Model v0.2 · research'),
+            ('0.2.0-dual-paper-tracks-cost-aware','capital','Model v0.2 · capital'),
+        ]
+        known={(version,mode) for version,mode,_ in cohort_defs}
+        for trade in closed_all:
+            meta=safe_json(trade.metadata_json or '{}')
+            version=meta.get('scalper_version') or 'legacy/unknown'
+            mode=meta.get('mode') or 'research'
+            if (version,mode) not in known:
+                cohort_defs.append((version,mode,f'{version} · {mode}'))
+                known.add((version,mode))
+        model_stats=[]
+        for version,mode,label in cohort_defs:
+            lane=[t for t in closed_all if (safe_json(t.metadata_json or '{}').get('scalper_version') or 'legacy/unknown')==version
+                  and (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
+            wins=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)>0]
+            losses=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)<0]
+            model_stats.append({'version':version,'mode':mode,'label':label,'closed':len(lane),
+                'wins':len(wins),'losses':len(losses),'win_rate':100.0*len(wins)/len(lane) if lane else None,
+                'net':sum(float(t.net_after_tax_inr or 0) for t in lane),
+                'pf':sum(wins)/abs(sum(losses)) if losses else None})
         for t in [x for x in closed if float(x.net_after_tax_inr or 0) < 0][:60]:
             meta=safe_json(t.metadata_json or '{}')
             t.mode=meta.get('mode') or 'research'
@@ -777,7 +803,7 @@ def scalper_review_page(request: Request):
             'relaxed_reversal_target_first':relaxed_target_first,'relaxed_reversal_stop_first':relaxed_stop_first,
             'scan_start':scan_cutoff}
     return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
-        cfg=cfg,lane_stats=lane_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
+        cfg=cfg,lane_stats=lane_stats,model_stats=model_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
 
 
 @app.post('/scalper/start')
