@@ -203,7 +203,7 @@ def loss_review_page(request: Request):
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
         runtime=read_config(db,'runtime',{})
-        tax_pct=float(cfg.get('scalper_tax_pct',30))
+        spot_tax_pct=float(cfg.get('scalper_spot_tax_pct',30)); futures_tax_pct=float(cfg.get('scalper_futures_tax_pct',30))
         fx=float(cfg.get('inr_per_usdt',94.75))
         trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
         coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
@@ -213,7 +213,9 @@ def loss_review_page(request: Request):
         for t in trades:
             opened=_as_utc(t.created_at); closed=_as_utc(t.closed_at)
             metadata=safe_json(t.metadata_json or '{}')
-            actual_tax=max(0.0,float(t.gross_pnl_inr or 0))*tax_pct/100
+            tax_rate=spot_tax_pct if t.product=='spot' else futures_tax_pct
+            taxable_basis=max(0.0,float(t.gross_pnl_inr or 0)) if t.product=='spot' else max(0.0,float(t.gross_pnl_inr or 0)-float(t.fees_inr or 0)-float(t.slippage_inr or 0)-float(t.funding_inr or 0))
+            actual_tax=taxable_basis*tax_rate/100
             actual_after_tax=float(t.net_pnl_inr or 0)-actual_tax
             t.actual_after_tax=actual_after_tax
             t.diagnosis=_paper_trade_diagnosis(t)
@@ -252,7 +254,8 @@ def loss_review_page(request: Request):
                 funding=0.0
                 if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
                     funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
-                tax=max(0.0,gross)*tax_pct/100
+                taxable_basis=max(0.0,gross) if t.product=='spot' else max(0.0,gross-fees-slips-funding)
+                tax=max(0.0,taxable_basis)*tax_rate/100
                 after_tax=gross-fees-slips-funding-tax
                 delta_net=after_tax-actual_after_tax
                 tolerance_inr=max(5.0,entry_notional*fx*0.001)
@@ -277,7 +280,7 @@ def loss_review_page(request: Request):
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
-        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,tax_pct=tax_pct,runtime=runtime))
+        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime))
 
 
 @app.get('/scalper', response_class=HTMLResponse)
