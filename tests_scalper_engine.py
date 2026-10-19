@@ -40,70 +40,71 @@ CFG = {
 }
 
 def run():
-    with SessionLocal() as db:
-        now = utcnow()
-        db.add(ConfigKV(key="strategy_config", value=json.dumps(CFG)))
-        snap = MarketSnapshot(
-            product="futures", pair="B-BTC_USDT", last_price=100.75,
-            bid=100.74, ask=100.76, quote_turnover_usdt=50_000_000,
-            liquidity_source="test", active=True, exit_only=False,
-            updated_at=now, raw_json="{}",
-        )
-        db.add(snap)
-        for observed_at, price in (
-            (now - timedelta(minutes=10), 100.0),
-            (now - timedelta(minutes=5), 100.30),
-            (now - timedelta(seconds=10), 100.75),
-        ):
-            db.add(MarketObservation(
-                observed_at=observed_at, product="futures", pair="B-BTC_USDT",
-                last_price=price, bid=price - 0.01, ask=price + 0.01,
-                active=True, source_updated_at=observed_at,
-            ))
-        db.commit()
-
-        candidates = build_scalper_scan(db, CFG, now)
-        candidate = next(x for x in candidates if x["pair"] == "B-BTC_USDT")
-        assert candidate["eligible"], candidate
-        assert candidate["side"] == "buy", candidate
-        assert candidate["cost_hurdle_pct"] > 0, candidate
-        opened = run_scalper_cycle(db, now)
-        assert opened["opened"] == 1, opened
-        trade = db.scalar(__import__("sqlalchemy").select(ScalpTrade).where(ScalpTrade.status == "open"))
-        assert trade is not None
-        assert trade.entry_price >= snap.ask - 1e-9, (trade.entry_price, snap.ask)
-
-        # Move executable bid up by >1%; paper position should close at bid,
-        # with positive fees/slippage/tax reserve and target-based exit reason.
-        snap.last_price = 101.80
-        snap.bid = 101.79
-        snap.ask = 101.81
-        snap.updated_at = now + timedelta(seconds=20)
-        db.commit()
-        closed = run_scalper_cycle(db, now + timedelta(seconds=20))
-        db.refresh(trade)
-        assert closed["closed"] == 1, closed
-        assert trade.status == "closed"
-        assert trade.exit_price == snap.bid, (trade.exit_price, snap.bid)
-        assert trade.fees_inr > 0 and trade.slippage_inr > 0 and trade.tax_reserve_inr > 0
-        assert trade.net_after_tax_inr > 0
-        assert "take profit" in trade.exit_reason.lower(), trade.exit_reason
-        assert trade.tds_estimate_inr == 0, "Futures must not show spot transfer TDS"
-
-        # Verify taxable assumptions are product-aware and TDS stays display-only.
-        spot = type("TradeLike", (), {
-            "side": "buy", "quantity": 1.0, "entry_price": 100.0,
-            "product": "spot",
-        })()
-        mark = _scalp_calculate(spot, 101.0, CFG, 94.75)
-        assert mark["tax"] > 0 and mark["tds"] > 0, mark
-        futures = type("TradeLike", (), {
-            "side": "buy", "quantity": 1.0, "entry_price": 100.0,
-            "product": "futures",
-        })()
-        futures_mark = _scalp_calculate(futures, 101.0, CFG, 94.75)
-        assert futures_mark["tax"] > 0 and futures_mark["tds"] == 0, futures_mark
-        print("SCALPER REGRESSION PASSED: signal gates, bid/ask entry/exit, costs, tax assumptions, target exit, no futures TDS.")
+    try:
+        with SessionLocal() as db:
+            now = utcnow()
+            db.add(ConfigKV(key="strategy_config", value=json.dumps(CFG)))
+            snap = MarketSnapshot(
+                product="futures", pair="B-BTC_USDT", last_price=100.75,
+                bid=100.74, ask=100.76, quote_turnover_usdt=50_000_000,
+                liquidity_source="test", active=True, exit_only=False,
+                updated_at=now, raw_json="{}",
+            )
+            db.add(snap)
+            for observed_at, price in (
+                (now - timedelta(minutes=10), 100.0),
+                (now - timedelta(minutes=5), 100.30),
+                (now - timedelta(seconds=10), 100.75),
+            ):
+                db.add(MarketObservation(
+                    observed_at=observed_at, product="futures", pair="B-BTC_USDT",
+                    last_price=price, bid=price - 0.01, ask=price + 0.01,
+                    active=True, source_updated_at=observed_at,
+                ))
+            db.commit()
+    
+            candidates = build_scalper_scan(db, CFG, now)
+            candidate = next(x for x in candidates if x["pair"] == "B-BTC_USDT")
+            assert candidate["eligible"], candidate
+            assert candidate["side"] == "buy", candidate
+            assert candidate["cost_hurdle_pct"] > 0, candidate
+            opened = run_scalper_cycle(db, now)
+            assert opened["opened"] == 1, opened
+            trade = db.scalar(__import__("sqlalchemy").select(ScalpTrade).where(ScalpTrade.status == "open"))
+            assert trade is not None
+            assert trade.entry_price >= snap.ask - 1e-9, (trade.entry_price, snap.ask)
+    
+            # Move executable bid up by >1%; paper position should close at bid,
+            # with positive fees/slippage/tax reserve and target-based exit reason.
+            snap.last_price = 101.80
+            snap.bid = 101.79
+            snap.ask = 101.81
+            snap.updated_at = now + timedelta(seconds=20)
+            db.commit()
+            closed = run_scalper_cycle(db, now + timedelta(seconds=20))
+            db.refresh(trade)
+            assert closed["closed"] == 1, closed
+            assert trade.status == "closed"
+            assert trade.exit_price == snap.bid, (trade.exit_price, snap.bid)
+            assert trade.fees_inr > 0 and trade.slippage_inr > 0 and trade.tax_reserve_inr > 0
+            assert trade.net_after_tax_inr > 0
+            assert "take profit" in trade.exit_reason.lower(), trade.exit_reason
+            assert trade.tds_estimate_inr == 0, "Futures must not show spot transfer TDS"
+    
+            # Verify taxable assumptions are product-aware and TDS stays display-only.
+            spot = type("TradeLike", (), {
+                "side": "buy", "quantity": 1.0, "entry_price": 100.0,
+                "product": "spot",
+            })()
+            mark = _scalp_calculate(spot, 101.0, CFG, 94.75)
+            assert mark["tax"] > 0 and mark["tds"] > 0, mark
+            futures = type("TradeLike", (), {
+                "side": "buy", "quantity": 1.0, "entry_price": 100.0,
+                "product": "futures",
+            })()
+            futures_mark = _scalp_calculate(futures, 101.0, CFG, 94.75)
+            assert futures_mark["tax"] > 0 and futures_mark["tds"] == 0, futures_mark
+            print("SCALPER REGRESSION PASSED: signal gates, bid/ask entry/exit, costs, tax assumptions, target exit, no futures TDS.")
     finally:
         try:
             Path(_tmp.name).unlink()
