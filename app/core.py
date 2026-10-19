@@ -321,11 +321,11 @@ def refresh_markets(db: Session):
             turnover_usdt=snap.quote_turnover_usdt, active=snap.active,
             source_updated_at=snap.updated_at))
     db.flush()
-    # Retain up to 30 days, with an independent hard row cap to protect DB storage.
+    # Retain up to 30 days, with a 500k-row hard cap (roughly ten days at the current 176-pair universe).
     db.execute(delete(MarketObservation).where(MarketObservation.observed_at < now - timedelta(days=30)))
     observation_count = db.scalar(select(func.count(MarketObservation.id))) or 0
-    if observation_count > 100000:
-        excess = observation_count - 100000
+    if observation_count > 500000:
+        excess = observation_count - 500000
         oldest_ids = select(MarketObservation.id).order_by(MarketObservation.observed_at.asc(), MarketObservation.id.asc()).limit(excess)
         db.execute(delete(MarketObservation).where(MarketObservation.id.in_(oldest_ids)))
     # Evaluate pending counterfactuals on every market refresh, not just strategy rebalance.
