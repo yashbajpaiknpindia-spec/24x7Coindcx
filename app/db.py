@@ -120,6 +120,15 @@ class ScalpTrade(Base):
     metadata_json: Mapped[str] = mapped_column(Text, default='{}')
 
 
+class ScalpScanSnapshot(Base):
+    """Bounded snapshots of accepted and rejected scalper candidates for hindsight review."""
+    __tablename__ = 'scalp_scan_snapshots'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    mode: Mapped[str] = mapped_column(String(16), default='research', index=True)
+    candidates_json: Mapped[str] = mapped_column(Text, default='[]')
+
+
 class OrderRecord(Base):
     __tablename__ = 'order_records'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

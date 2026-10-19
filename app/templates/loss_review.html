@@ -13,23 +13,20 @@
  <div class="stat-card"><div class="stat-top"><span>72-hour hold comparisons</span></div><div class="stat-value">{{review_stats['72h'].evaluated}}</div><div class="stat-foot">{{review_stats['72h'].held_better}} did better at endpoint · {{review_stats['72h'].potential_recovery}} losing trades had a positive sampled peak</div></div>
  <div class="stat-card"><div class="stat-top"><span>7-day hold comparisons</span></div><div class="stat-value">{{review_stats['7d'].evaluated}}</div><div class="stat-foot">{{review_stats['7d'].held_better}} did better at endpoint · {{review_stats['7d'].potential_recovery}} losing trades had a positive sampled peak</div></div>
 </div>
-<section class="panel"><div class="panel-head"><div><div class="eyebrow">CLOSED PAPER TRADES</div><h3>Actual exit versus 1h / 4h / 24h / 72h / 7-day hold</h3><p class="muted">Hypothetical P&amp;L keeps the original entry and quantity, marks at the target horizon's closest stored executable quote, includes modeled close costs and a product-specific reserve (spot: {{spot_tax_pct}}% planning reserve; futures: {{futures_tax_pct}}% assumed income-tax rate). It is not a liquidation-path reconstruction.</p></div><span class="tag">{{trades|length}} trades</span></div>
-<div class="table-wrap"><table><thead><tr><th>Trade</th><th>Open / exit (IST)</th><th>Pair / side</th><th>Actual exit reason</th><th>Actual net after estimated tax ₹</th><th>Horizon</th><th>Sample mark (IST)</th><th>Hypothetical net after tax ₹</th><th>Difference vs actual ₹</th><th>Review</th></tr></thead><tbody>
-{% for t in trades %}{% for r in t.review_rows %}
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">CLOSED PAPER TRADES</div><h3>One row per trade · compare horizons across columns</h3><p class="muted">Each horizon shows its status and after-tax difference versus the actual exit. Historical extremes are not guaranteed fills; a favourable later mark does not prove a position could safely have been held.</p></div><span class="tag">{{trades|length}} trades</span></div>
+<div class="table-wrap"><table><thead><tr><th>Trade / mode</th><th>Pair / side</th><th>Actual net</th><th>Exit &amp; timing diagnosis</th><th>1h</th><th>4h</th><th>24h</th><th>72h</th><th>7d</th></tr></thead><tbody>
+{% for t in trades %}
 <tr>
-<td class="mono">#{{t.id}}<div class="muted">{{'Research' if t.run_mode=='paper' else 'Capital mode'}}</div></td>
-<td class="mono">{{t.created_at|ist('%d-%m %H:%M') if t.created_at else '—'}}<div class="muted">{{t.closed_at|ist('%d-%m %H:%M') if t.closed_at else '—'}}</div></td>
+<td class="mono">#{{t.id}}<div class="muted">{{'Research' if t.run_mode=='paper' else 'Capital mode'}}</div><div class="muted">{{t.created_at|ist('%d-%m %H:%M') if t.created_at else '—'}}</div></td>
 <td><b>{{t.pair}}</b><div class="muted">{{t.product|upper}} · {{t.side|upper}}</div></td>
-<td><b>{{t.reason or 'Exit reason missing'}}</b><div class="muted">{{t.diagnosis}}</div><div class="muted"><b>Entry timing:</b> {{t.entry_timing_diagnosis}}</div></td>
 <td class="mono {{'positive' if t.actual_after_tax>=0 else 'negative'}}">₹{{'%+.2f'|format(t.actual_after_tax)}}</td>
-<td><b>{{r.name}}</b><div class="muted">{{r.status}}</div></td>
-<td class="mono">{{r.at|ist('%d-%m %H:%M') if r.at is defined else '—'}}</td>
-<td class="mono {{'positive' if r.net_after_tax_inr is defined and r.net_after_tax_inr>=0 else 'negative' if r.net_after_tax_inr is defined else ''}}">{{'₹%+.2f'|format(r.net_after_tax_inr) if r.net_after_tax_inr is defined else '—'}}</td>
-<td class="mono {{'positive' if r.delta_inr is defined and r.delta_inr>0 else 'negative' if r.delta_inr is defined and r.delta_inr<0 else ''}}">{{'₹%+.2f'|format(r.delta_inr) if r.delta_inr is defined else '—'}}</td>
-<td>{{r.label}}<div class="muted">{{r.note}}</div></td>
+<td><b>{{t.reason or 'Exit reason missing'}}</b><div class="muted">{{t.diagnosis}}</div><div class="muted"><b>Timing:</b> {{t.entry_timing_diagnosis}}</div></td>
+{% for horizon in ['1h','4h','24h','72h','7d'] %}
+<td>{% for r in t.review_rows if r.name==horizon %}<b>{{r.status}}</b><div class="mono {{'positive' if r.delta_inr is defined and r.delta_inr>0 else 'negative' if r.delta_inr is defined and r.delta_inr<0 else ''}}">{{'₹%+.2f'|format(r.delta_inr) if r.delta_inr is defined else '—'}}</div><div class="muted">{{r.label}}</div>{% endfor %}</td>
+{% endfor %}
 </tr>
-{% endfor %}{% endfor %}
-{% if not trades %}<tr><td colspan="10" class="empty">No closed paper trades available for revaluation yet.</td></tr>{% endif %}
+{% endfor %}
+{% if not trades %}<tr><td colspan="9" class="empty">No closed paper trades available for revaluation yet.</td></tr>{% endif %}
 </tbody></table></div></section>
 <section class="panel"><div class="panel-head"><div><div class="eyebrow">HOW TO READ IT</div><h3>What counts as a potentially wrong exit?</h3></div></div>
 <p>A horizon is labelled “potentially exited too early” only when the modeled after-tax endpoint would exceed the actual after-tax result by more than a small tolerance. It does not mean the position never hit a stop or liquidation price between samples. “Exit better than holding” means the sampled endpoint is worse than the actual exit, not that every stop was perfectly timed.</p>
