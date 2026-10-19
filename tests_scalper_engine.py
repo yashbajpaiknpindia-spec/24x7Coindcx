@@ -58,7 +58,6 @@ def run():
             db.add(MarketObservation(
                 observed_at=observed_at, product="futures", pair="B-BTC_USDT",
                 last_price=price, bid=price - 0.01, ask=price + 0.01,
-                turnover_usdt=50_000_000 if hasattr(MarketObservation, "turnover_usdt") else None,
                 active=True, source_updated_at=observed_at,
             ))
         db.commit()
