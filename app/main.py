@@ -385,8 +385,10 @@ def loss_review_page(request: Request):
         spot_tax_pct=float(cfg.get('scalper_spot_tax_pct',30)); futures_tax_pct=float(cfg.get('scalper_futures_tax_pct',30))
         fx=float(cfg.get('inr_per_usdt',94.75))
         trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
-        coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
-        first_obs,last_obs,obs_count=coverage
+        coverage=db.execute(select(func.min(LossReviewCandle.candle_time),func.max(LossReviewCandle.candle_time),func.count(LossReviewCandle.id))).one()
+        first_obs,last_obs,candle_count=coverage
+        obs_count=db.scalar(select(func.count(MarketObservation.id))) or 0
+        fetch_info=runtime.get('loss_review_fetch_result',{})
         horizons=(('1h',timedelta(hours=1)),('4h',timedelta(hours=4)),('24h',timedelta(hours=24)),('72h',timedelta(hours=72)),('7d',timedelta(days=7)))
         summaries={h:{'evaluated':0,'held_better':0,'exit_better':0,'potential_recovery':0,'avg_delta':None,'_deltas':[]} for h,_ in horizons}
         rows=[]
@@ -402,29 +404,31 @@ def loss_review_page(request: Request):
             entry_notional=abs(float(t.quantity or 0)*float(t.entry_price or 0))
             fee_pct=float(cfg.get('spot_fee_pct' if t.product=='spot' else 'futures_fee_pct',0.15 if t.product=='spot' else 0.075))/100
             slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
+            candle_rows=[]
             obs_rows=[]
-            if closed and t.entry_price and t.quantity:
-                # Pull the stored path once per trade, then reuse it for all horizons.
-                # The cap/retention policy bounds the requested seven-day window.
-                obs_end=min(closed+timedelta(days=7,minutes=15),now)
+            if closed and opened and t.entry_price and t.quantity:
+                path_end=min(now,closed+timedelta(days=7,minutes=15))
+                candle_rows=db.scalars(select(LossReviewCandle).where(
+                    LossReviewCandle.product==t.product,LossReviewCandle.pair==t.pair,
+                    LossReviewCandle.candle_time>=opened-timedelta(hours=1),
+                    LossReviewCandle.candle_time<=path_end
+                ).order_by(LossReviewCandle.candle_time.asc())).all()
                 obs_rows=db.scalars(select(MarketObservation).where(
                     MarketObservation.product==t.product,MarketObservation.pair==t.pair,
-                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=obs_end
+                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=path_end
                 ).order_by(MarketObservation.observed_at.asc())).all()
 
-            def hypothetical_mark(obs):
-                obs_time=_as_utc(obs.observed_at)
-                executable=(obs.bid if t.side=='buy' else obs.ask)
-                fallback=not bool(executable and executable>0)
-                exit_price=float(executable if not fallback else (obs.last_price or 0))
+            def hypothetical_mark(price, at, source='Historical OHLC candle'):
+                exit_price=float(price or 0)
                 if exit_price<=0:
                     return None
+                at_utc=_as_utc(at)
                 direction=1 if t.side=='buy' else -1
                 gross=(exit_price-float(t.entry_price))*float(t.quantity)*direction*fx
                 exit_notional=abs(float(t.quantity)*exit_price)
                 fees=(entry_notional+exit_notional)*fee_pct*fx
                 slips=(entry_notional+exit_notional)*slip_pct*fx
-                elapsed_hours=max(0,(obs_time-opened).total_seconds()/3600) if opened else 0
+                elapsed_hours=max(0,(at_utc-opened).total_seconds()/3600) if opened else 0
                 funding=0.0
                 if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
                     funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
@@ -433,45 +437,85 @@ def loss_review_page(request: Request):
                 net=gross-fees-slips-funding-tax
                 return {'price':exit_price,'gross_inr':gross,'fees_inr':fees,'slippage_inr':slips,
                         'funding_inr':funding,'tax_inr':tax,'net_after_tax_inr':net,
-                        'at':obs.observed_at,'fallback':fallback}
+                        'at':at,'fallback':source!='Historical OHLC candle','source':source}
 
+            direction=1 if t.side=='buy' else -1
+            pre=[x for x in candle_rows if opened-timedelta(hours=1)<=_as_utc(x.candle_time)<opened and x.open_price and x.close_price]
+            first_hour=[x for x in candle_rows if opened<=_as_utc(x.candle_time)<=min(closed or opened+timedelta(hours=1),opened+timedelta(hours=1)) and x.open_price and x.close_price]
+            if len(pre)>=2:
+                prior_drift=(float(pre[-1].close_price)/float(pre[0].open_price)-1)*100*direction
+                if prior_drift>=0.60 and first_hour:
+                    post_drift=(float(first_hour[-1].close_price)/float(first_hour[0].open_price)-1)*100*direction
+                    if post_drift<=-0.30:
+                        t.entry_timing_diagnosis=f'Possible late/chased entry: price had already moved {prior_drift:+.2f}% in the trade direction during the prior hour, then the first hour after entry moved {post_drift:+.2f}% against the position.'
+                    else:
+                        t.entry_timing_diagnosis=f'Pre-entry price was already extended by {prior_drift:+.2f}% in the trade direction. Late entry is possible but not established by this path alone.'
+                elif prior_drift<=-0.50:
+                    t.entry_timing_diagnosis=f'Potentially weak timing: pre-entry hour moved {prior_drift:+.2f}% against the position direction.'
+                else:
+                    t.entry_timing_diagnosis=f'Pre-entry hour drift was {prior_drift:+.2f}% in the position direction; no clear chase signal from the OHLC bars.'
+            elif any(_as_utc(x.candle_time)<opened for x in candle_rows):
+                t.entry_timing_diagnosis='Some pre-entry candles exist, but fewer than two usable bars; timing remains uncertain.'
+            else:
+                t.entry_timing_diagnosis='Entry timing cannot be confirmed until historical pre-entry candles have been fetched.'
+
+            horizon_rows=[]
             for key,delta in horizons:
                 if not closed:
-                    horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No closed timestamp to anchor this comparison.'})
+                    horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No close timestamp to anchor this comparison.'})
                     continue
                 target=closed+delta
                 reached=target<=now
                 path_end=target if reached else now
                 path_marks=[]
+                # OHLC highs/lows describe possible path extremes, not guaranteed executable fills.
+                for candle in candle_rows:
+                    at=_as_utc(candle.candle_time)
+                    if at<=closed or at>path_end:
+                        continue
+                    fav_price=candle.high_price if t.side=='buy' else candle.low_price
+                    adverse_price=candle.low_price if t.side=='buy' else candle.high_price
+                    best_mark=hypothetical_mark(fav_price,candle.candle_time,'OHLC favorable extreme')
+                    worst_mark=hypothetical_mark(adverse_price,candle.candle_time,'OHLC adverse extreme')
+                    if best_mark: path_marks.append(best_mark)
+                    if worst_mark: path_marks.append(worst_mark)
                 for observation in obs_rows:
-                    if _as_utc(observation.observed_at)>path_end:
-                        break
-                    mark=hypothetical_mark(observation)
-                    if mark:
-                        path_marks.append(mark)
+                    at=_as_utc(observation.observed_at)
+                    if at<=closed or at>path_end:
+                        continue
+                    executable=observation.bid if t.side=='buy' else observation.ask
+                    quote=executable if executable and executable>0 else observation.last_price
+                    mark=hypothetical_mark(quote,observation.observed_at,
+                        'Stored executable quote' if executable and executable>0 else 'Stored last-price fallback')
+                    if mark: path_marks.append(mark)
                 best=max(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
                 worst=min(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
-                # The target endpoint uses the first recorded executable quote in a 15-minute
-                # tolerance after the horizon. For pending horizons, only partial-path extremes
-                # are shown until the full horizon elapses.
                 endpoint=None
+                endpoint_interval=15 if t.product=='spot' else 5
                 if reached:
-                    endpoint_obs=next((o for o in obs_rows if target<=_as_utc(o.observed_at)<=target+timedelta(minutes=15)),None)
-                    if endpoint_obs:
-                        endpoint=hypothetical_mark(endpoint_obs)
+                    endpoint_candle=next((o for o in candle_rows if target<=_as_utc(o.candle_time)<=target+timedelta(minutes=endpoint_interval)),None)
+                    if endpoint_candle:
+                        endpoint=hypothetical_mark(endpoint_candle.close_price,endpoint_candle.candle_time,'Historical OHLC close')
+                    else:
+                        endpoint_obs=next((o for o in obs_rows if target<=_as_utc(o.observed_at)<=target+timedelta(minutes=15)),None)
+                        if endpoint_obs:
+                            quote=endpoint_obs.bid if t.side=='buy' else endpoint_obs.ask
+                            if not quote or quote<=0:
+                                quote=endpoint_obs.last_price
+                            endpoint=hypothetical_mark(quote,endpoint_obs.observed_at,'Stored quote/last-price')
                 if not reached:
-                    note='Horizon is still pending. Partial post-exit observations are shown; best/worst marks are hindsight samples, not guaranteed executable exits.'
+                    note='Horizon pending. Partial OHLC/quote history is shown; a sampled peak is hindsight and may have required enduring a larger interim drawdown.'
                     if best:
-                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
                     horizon_rows.append({'name':key,'status':'Pending','label':'Horizon not reached','note':note,
                         'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
                         'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
                         'best_at':best['at'] if best else None,'worst_at':worst['at'] if worst else None})
                     continue
                 if not endpoint:
-                    note='No stored executable quote within 15 minutes after this horizon. Endpoint comparison is unavailable; best/worst path marks are partial evidence only.'
+                    note='No stored or fetched candle/quote covers this endpoint. Click Fetch historical candles; until then the outcome is not judged.'
                     if best:
-                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                        note+=f" Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
                     horizon_rows.append({'name':key,'status':'Insufficient data','label':'Cannot judge endpoint','note':note,
                         'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
                         'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
@@ -485,13 +529,12 @@ def loss_review_page(request: Request):
                     label='Actual exit beats this endpoint'
                 else:
                     label='Similar net result at endpoint'
-                note=('Used last-price fallback because executable quote was missing. ' if endpoint['fallback'] else '')
-                note+='Endpoint is not a complete trade-path reconstruction.'
+                note=f"Endpoint based on {endpoint['source']}; fees/slippage/tax are modeled, while candle highs/lows are not guaranteed exit fills. "
                 if best:
-                    note+=f" Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}."
+                    note+=f"Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}."
                 if worst:
-                    note+=f" Worst sampled post-exit net: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
-                note+=' Peaks/troughs are hindsight marks, not proof the position would have survived or that a live order could fill there.'
+                    note+=f" Worst sampled post-exit net: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
+                note+=' OHLC highs/lows are hindsight extrema, not proof that a position would survive interim drawdown or liquidation.'
                 row={'name':key,'status':'Evaluated','label':label,'gross_inr':endpoint['gross_inr'],
                     'fees_inr':endpoint['fees_inr'],'slippage_inr':endpoint['slippage_inr'],
                     'funding_inr':endpoint['funding_inr'],'tax_inr':endpoint['tax_inr'],
@@ -516,7 +559,7 @@ def loss_review_page(request: Request):
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
-        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime))
+        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,candle_count=candle_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime,fetch_info=fetch_info,fetch_message=runtime.get('loss_review_fetch_message','Historical candle fetch has not been run yet.'))
 
 
 @app.get('/scalper', response_class=HTMLResponse)
