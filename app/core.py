@@ -15,17 +15,17 @@ PAPER_ENGINE_VERSION = '1.6.0-dual-ledger-storage-telemetry'
 SCALPER_VERSION = '0.1.0-paper-fast-scalper'
 SCALPER_DEFAULTS = {
     'scalper_enabled': True,
-    'scalper_notional_usdt': env_float('SCALPER_NOTIONAL_USDT', 100),
+    'scalper_notional_usdt': 100.0,
     'scalper_max_open_positions': 3,
-    'scalper_min_turnover_usdt': env_float('SCALPER_MIN_TURNOVER_USDT', 1000000),
-    'scalper_max_spread_bps': env_float('SCALPER_MAX_SPREAD_BPS', 5),
-    'scalper_min_cost_multiple': env_float('SCALPER_MIN_COST_MULTIPLE', 1.5),
-    'scalper_min_signal_move_pct': env_float('SCALPER_MIN_SIGNAL_MOVE_PCT', 0.25),
-    'scalper_target_net_pct': env_float('SCALPER_TARGET_NET_PCT', 0.15),
-    'scalper_stop_net_pct': env_float('SCALPER_STOP_NET_PCT', 0.40),
-    'scalper_max_hold_minutes': env_int('SCALPER_MAX_HOLD_MINUTES', 15),
-    'scalper_tax_pct': env_float('SCALPER_TAX_RESERVE_PCT', 30),
-    'scalper_tds_pct': env_float('SCALPER_TDS_ESTIMATE_PCT', 1),
+    'scalper_min_turnover_usdt': 1000000.0,
+    'scalper_max_spread_bps': 5.0,
+    'scalper_min_cost_multiple': 1.5,
+    'scalper_min_signal_move_pct': 0.25,
+    'scalper_target_net_pct': 0.15,
+    'scalper_stop_net_pct': 0.40,
+    'scalper_max_hold_minutes': 15,
+    'scalper_tax_pct': 30,
+    'scalper_tds_pct': 1,
 }
 # Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
 # ranks, which can manufacture large scores from tiny price noise. Keep them visible
