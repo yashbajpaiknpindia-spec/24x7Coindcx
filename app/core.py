@@ -33,6 +33,7 @@ SCALPER_DEFAULTS = {
     'scalper_pair_cooldown_minutes': 5,
     'scalper_spot_fee_pct': 0.15,
     'scalper_futures_fee_pct': 0.075,
+    'scalper_fee_gst_pct': 18.0,  # GST on exchange trading fees, subject to the actual account/venue invoice.
     'scalper_normal_slippage_pct': 0.05,
     'scalper_stress_slippage_pct': 0.12,
     'scalper_spot_tax_pct': 31.2,  # 30% VDA tax plus 4% cess, before any surcharge.
