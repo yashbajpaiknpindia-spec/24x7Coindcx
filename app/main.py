@@ -602,7 +602,7 @@ def scalper_page(request: Request):
             t.return_5m=t.meta.get('return_5m_pct')
             t.return_10m=t.meta.get('return_10m_pct')
             t.return_previous_5m=t.meta.get('return_previous_5m_pct')
-    entries_paused=not bool(cfg.get('scalper_strategy_validation_passed',False))
+    entries_paused=cfg.get('scalper_strategy_validation_passed') is not True
     entry_pause_reason='No strategy passed the 30-day blind acceptance gate; scanning, candidate audits and exits for existing positions continue.' if entries_paused else None
     return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',
         cfg=cfg,runtime=runtime,candidates=candidates[:120],trades=trades,scalper_stats=stats,lane_stats=lane_stats,
@@ -818,7 +818,7 @@ def scalper_start(request: Request):
         return RedirectResponse('/login',status_code=303)
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
-        if not bool(cfg.get('scalper_strategy_validation_passed',False)):
+        if cfg.get('scalper_strategy_validation_passed') is not True:
             log_event(db,'Scalper start denied: no strategy passed the 30-day blind acceptance gate. Scanner/audit and existing-position exits remain active.','WARNING','scalper')
             db.commit()
             return RedirectResponse('/scalper?validation_required=1',status_code=303)
