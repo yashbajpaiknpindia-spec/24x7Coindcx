@@ -11,7 +11,7 @@ PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USD
 STRATEGY_ID = 'CSM14D_VOL14D_LIQ7D_DAILY'
 STRATEGY_NAME = '14D Cross-Sectional Momentum / Volatility Rank'
 STRATEGY_VERSION = '1.0.0-research-reproduction'
-PAPER_ENGINE_VERSION = '1.6.0-dual-ledger-storage-telemetry'
+PAPER_ENGINE_VERSION = '1.7.0-dual-ledger-scalper-entry-review'
 SCALPER_VERSION = '0.1.0-paper-fast-scalper'
 SCALPER_DEFAULTS = {
     'scalper_enabled': True,
@@ -24,8 +24,8 @@ SCALPER_DEFAULTS = {
     'scalper_target_net_pct': 0.15,
     'scalper_stop_net_pct': 0.40,
     'scalper_max_hold_minutes': 15,
-    'scalper_spot_tax_pct': 30,
-    'scalper_futures_tax_pct': 30,  # Editable planning reserve; actual tax is individual slab for Global Futures.
+    'scalper_spot_tax_pct': 31.2,  # 30% base plus 4% cess reserve; surcharge may apply.
+    'scalper_futures_tax_pct': 31.2,  # Editable planning reserve only; futures treatment depends on tax classification.
     'scalper_tds_pct': 1,  # Display-only estimate for spot transfers; not deducted from P&L.
 
 }
