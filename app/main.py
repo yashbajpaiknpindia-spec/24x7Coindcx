@@ -239,12 +239,14 @@ def paper_page(request: Request):
         opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
         ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
         t.held_minutes=max(0,(ended-opened).total_seconds()/60)
+        t.diagnosis=_paper_trade_diagnosis(t)
     for t in trades:
         opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at.astimezone(timezone.utc)
         ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at.astimezone(timezone.utc) if t.closed_at else now_utc)
         t.held_minutes=max(0,(ended-opened).total_seconds()/60)
         t.invested_usdt=abs(float(t.quantity or 0)*float(t.entry_price or 0))
         t.invested_inr=t.invested_usdt*fx
+        t.diagnosis=_paper_trade_diagnosis(t)
     wins=sum(1 for t in closed if (t.net_pnl_inr or 0)>0)
     losses=sum(1 for t in closed if (t.net_pnl_inr or 0)<0)
     stats={'closed':len(closed),'wins':wins,'losses':losses,'win_rate':(100*wins/len(closed) if closed else None),
