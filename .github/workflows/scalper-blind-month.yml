@@ -1,6 +1,8 @@
 name: CoinDCX scalper one-month blind test
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [scalper-blind-audit]
   workflow_dispatch:
