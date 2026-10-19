@@ -625,7 +625,7 @@ def scalper_review_page(request: Request):
             lane_stats[mode]={'closed':len(lane),'wins':len(wins),'losses':len(losses),
                 'net':sum(float(t.net_after_tax_inr or 0) for t in lane),
                 'pf':sum(wins)/abs(sum(losses)) if losses else None}
-        for t in closed[:60]:
+        for t in [x for x in closed if float(x.net_after_tax_inr or 0) < 0][:60]:
             meta=safe_json(t.metadata_json or '{}')
             t.mode=meta.get('mode') or 'research'
             t.meta=meta
@@ -647,6 +647,7 @@ def scalper_review_page(request: Request):
                 t.diagnosis='Mixed evidence. Compare entry impulse, maximum favorable/adverse excursion and modeled costs; this one trade alone cannot prove the signal bad.'
             t.cost_pct=100*(friction/max(float(t.notional_usdt or 0)*fx,1)) 
             t.net_pct=100*float(t.net_after_tax_inr or 0)/max(float(t.notional_usdt or 0)*fx,1)
+            loss_rows.append(t)
         scan_cutoff=min((_as_utc(x.scanned_at) for x in scans),default=now-timedelta(minutes=30))
         obs_rows=db.scalars(select(MarketObservation).where(MarketObservation.observed_at>=scan_cutoff+timedelta(minutes=2))
             .order_by(MarketObservation.observed_at.asc()).limit(16000)).all()
@@ -682,19 +683,56 @@ def scalper_review_page(request: Request):
                     fake.quantity=mode_notional/entry
                     mark=_scalp_calculate(fake,float(exit_price),cfg,fx)
                     sampled[mins]={'net':mark['net_after_tax'],'at':obs.observed_at}
+                net5_pct=(sampled[5]['net']/(mode_notional*fx)*100) if sampled[5] and mode_notional>0 and fx>0 else None
+                net10_pct=(sampled[10]['net']/(mode_notional*fx)*100) if sampled[10] and mode_notional>0 and fx>0 else None
+                target_pct=float(cfg.get('scalper_target_net_pct',0.15))
+                stop_pct=abs(float(cfg.get('scalper_stop_net_pct',0.40)))
+                outcome='Insufficient samples'
+                for minute, pct in ((5,net5_pct),(10,net10_pct)):
+                    if pct is None: continue
+                    if pct >= target_pct:
+                        outcome=f'Target threshold first sampled (+{pct:.3f}% at {minute}m)'
+                        break
+                    if pct <= -stop_pct:
+                        outcome=f'Stop threshold first sampled ({pct:.3f}% at {minute}m)'
+                        break
+                else:
+                    valid_pcts=[p for p in (net5_pct,net10_pct) if p is not None]
+                    if len(valid_pcts)==2: outcome='Sampled; neither target nor stop first'
+                    elif valid_pcts and max(valid_pcts)>0: outcome='Positive sample; target not reached'
+                    elif valid_pcts: outcome='Sampled; no positive net'
                 rejected.append({'mode':mode,'scanned_at':snap.scanned_at,'pair':cand.get('pair'),
                     'product':cand.get('product'),'side':side,'r5':cand.get('return_5m_pct'),
                     'r10':cand.get('return_10m_pct'),'spread':cand.get('spread_bps'),
                     'turnover':cand.get('turnover_usdt'),'depth':cand.get('entry_depth_10_usdt'),
                     'reason':cand.get('reason'),'net5':sampled[5]['net'] if sampled[5] else None,
                     'net10':sampled[10]['net'] if sampled[10] else None,
+                    'net5_pct':net5_pct,'net10_pct':net10_pct,'outcome':outcome,
                     'at5':sampled[5]['at'] if sampled[5] else None,'at10':sampled[10]['at'] if sampled[10] else None})
+        raw_rejected_count=len(rejected)
+        # Collapse repeated scans of the same product/pair/side into episodes. Keep
+        # the FIRST sample in each 15-minute episode so later repeated scans cannot
+        # cherry-pick the best-looking entry or inflate the missed-opportunity count.
+        rejected.sort(key=lambda x:_as_utc(x['scanned_at']) or now)
+        episodes=[]
+        last_seen={}
+        for item in rejected:
+            key=(item['mode'],item['product'],item['pair'],item['side'])
+            at=_as_utc(item['scanned_at'])
+            previous=last_seen.get(key)
+            if previous is not None and at is not None and (at-previous).total_seconds()<=900:
+                continue
+            episodes.append(item)
+            if at is not None: last_seen[key]=at
+        rejected=episodes
+        target_first=sum(1 for x in rejected if x['outcome'].startswith('Target threshold first'))
+        positive_samples=sum(1 for x in rejected if any(p is not None and p>0 for p in (x['net5_pct'],x['net10_pct'])))
         rejected.sort(key=lambda x:max(x['net5'] if x['net5'] is not None else -1e18,x['net10'] if x['net10'] is not None else -1e18),reverse=True)
-        useful_rejected=[x for x in rejected if ((x['net5'] is not None and x['net5']>0) or (x['net10'] is not None and x['net10']>0))][:50]
-        review_meta={'snapshots':len(scans),'candidates':len(rejected),'sampled':sum(1 for x in rejected if x['net5'] is not None or x['net10'] is not None),
-            'positive_rejected':len(useful_rejected),'scan_start':scan_cutoff}
+        review_meta={'snapshots':len(scans),'candidates':raw_rejected_count,'episodes':len(rejected),
+            'sampled':sum(1 for x in rejected if x['net5'] is not None or x['net10'] is not None),
+            'positive_rejected':target_first,'positive_samples':positive_samples,'scan_start':scan_cutoff}
     return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
-        cfg=cfg,lane_stats=lane_stats,loss_trades=closed[:60],rejected=useful_rejected,review_meta=review_meta))
+        cfg=cfg,lane_stats=lane_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
 
 
 @app.post('/scalper/start')
