@@ -333,9 +333,6 @@ def loss_review_page(request: Request):
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
-        for summ in summaries.values():
-            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
-            summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
         observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime))
 
@@ -438,6 +435,7 @@ def scalper_settings_save(request: Request,
             'scalper_spot_tax_pct':spot_tax_pct,
             'scalper_futures_tax_pct':futures_tax_pct,
             'scalper_tds_pct':tds_pct,
+            'scalper_spot_tax_default_version':'custom',
         })
         write_config(db,'strategy_config',cfg)
         log_event(db,'Fast scalper paper settings updated; no live exchange orders were sent.','INFO','scalper',
