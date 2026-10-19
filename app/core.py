@@ -3,7 +3,8 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import select, desc, func, delete
 from sqlalchemy.orm import Session
-from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, utcnow
+from collections import defaultdict
+from .db import SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 
 PAIR_UNIVERSE = ['B-BTC_USDT','B-ETH_USDT','B-SOL_USDT','B-ZEC_USDT','B-NEAR_USDT','B-XRP_USDT','B-DOGE_USDT','B-BNB_USDT','B-SUI_USDT','B-UNI_USDT','B-STRK_USDT','B-ENA_USDT','B-TRX_USDT','B-WLD_USDT']
@@ -11,6 +12,21 @@ STRATEGY_ID = 'CSM14D_VOL14D_LIQ7D_DAILY'
 STRATEGY_NAME = '14D Cross-Sectional Momentum / Volatility Rank'
 STRATEGY_VERSION = '1.0.0-research-reproduction'
 PAPER_ENGINE_VERSION = '1.6.0-dual-ledger-storage-telemetry'
+SCALPER_VERSION = '0.1.0-paper-fast-scalper'
+SCALPER_DEFAULTS = {
+    'scalper_enabled': True,
+    'scalper_notional_usdt': env_float('SCALPER_NOTIONAL_USDT', 100),
+    'scalper_max_open_positions': 3,
+    'scalper_min_turnover_usdt': env_float('SCALPER_MIN_TURNOVER_USDT', 1000000),
+    'scalper_max_spread_bps': env_float('SCALPER_MAX_SPREAD_BPS', 5),
+    'scalper_min_cost_multiple': env_float('SCALPER_MIN_COST_MULTIPLE', 1.5),
+    'scalper_min_signal_move_pct': env_float('SCALPER_MIN_SIGNAL_MOVE_PCT', 0.25),
+    'scalper_target_net_pct': env_float('SCALPER_TARGET_NET_PCT', 0.15),
+    'scalper_stop_net_pct': env_float('SCALPER_STOP_NET_PCT', 0.40),
+    'scalper_max_hold_minutes': env_int('SCALPER_MAX_HOLD_MINUTES', 15),
+    'scalper_tax_pct': env_float('SCALPER_TAX_RESERVE_PCT', 30),
+    'scalper_tds_pct': env_float('SCALPER_TDS_ESTIMATE_PCT', 1),
+}
 # Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
 # ranks, which can manufacture large scores from tiny price noise. Keep them visible
 # in the market scanner, but don't allow them into trend strategy candidates.
@@ -71,6 +87,15 @@ def initialize_defaults(db: Session):
     }
     for key, value in defaults.items():
         if db.get(ConfigKV, key) is None: write_config(db, key, value)
+    # Add new strategy settings to an existing deployment without overwriting user choices.
+    strategy_cfg=read_config(db, 'strategy_config', {})
+    changed=False
+    for setting, default_value in SCALPER_DEFAULTS.items():
+        if setting not in strategy_cfg:
+            strategy_cfg[setting]=default_value
+            changed=True
+    if changed:
+        write_config(db, 'strategy_config', strategy_cfg)
     seed_backtests(db)
     db.commit()
 
@@ -918,3 +943,224 @@ def dashboard_summary(db: Session):
     gross_losses=abs(sum(t.net_pnl_inr for t in closed if (t.net_pnl_inr or 0)<0))
     pf=(gross_wins/gross_losses) if gross_losses>0 else None
     return {'config':cfg,'live':live,'runtime':runtime,'market_count':len(markets),'fresh_markets':fresh,'eligible_markets':eligible,'paper_equity':eq,'open_paper_trades':open_trades,'closed_paper_trades':len(closed),'win_rate':(wins/len(closed)*100 if closed else None),'profit_factor':pf}
+
+
+
+def _scalp_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _scalp_spread_bps(snap):
+    return market_spread_bps(snap.bid, snap.ask) if snap and snap.bid and snap.ask else None
+
+
+def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
+    """Return explainable paper-scalper candidates. This is a 5-minute momentum screen,
+    evaluated on the worker's faster REST refresh; it is not tick-level HFT."""
+    cfg = cfg or read_config(db, 'strategy_config', {})
+    now = now or utcnow()
+    min_turnover = float(cfg.get('scalper_min_turnover_usdt', 1_000_000))
+    max_spread = float(cfg.get('scalper_max_spread_bps', 5))
+    min_move = float(cfg.get('scalper_min_signal_move_pct', 0.25))
+    cost_multiple = float(cfg.get('scalper_min_cost_multiple', 1.5))
+    snapshots = db.scalars(select(MarketSnapshot)).all()
+    obs_rows = db.scalars(
+        select(MarketObservation)
+        .where(MarketObservation.observed_at >= now - timedelta(minutes=25))
+        .order_by(MarketObservation.observed_at.desc())
+    ).all()
+    history = defaultdict(list)
+    for obs in obs_rows:
+        key = (obs.product, obs.pair)
+        if len(history[key]) < 3 and obs.last_price and obs.last_price > 0:
+            history[key].append(obs)
+    rows = []
+    for snap in snapshots:
+        row = {'product': snap.product, 'pair': snap.pair, 'price': snap.last_price,
+               'turnover_usdt': snap.quote_turnover_usdt, 'spread_bps': _scalp_spread_bps(snap),
+               'side': '—', 'return_5m_pct': None, 'return_10m_pct': None, 'cost_hurdle_pct': None,
+               'edge_multiple': None, 'eligible': False, 'reason': 'No valid setup yet'}
+        updated = _scalp_utc(snap.updated_at)
+        age = (now - updated).total_seconds() if updated else 1e9
+        sample = history.get((snap.product, snap.pair), [])
+        if snap.last_price and sample and sample[0].last_price:
+            tick_move = (float(snap.last_price) / float(sample[0].last_price) - 1) * 100
+        else:
+            tick_move = None
+        row['tick_move_pct'] = tick_move
+        if not snap.active:
+            row['reason'] = 'Market inactive'
+        elif snap.exit_only:
+            row['reason'] = 'Futures instrument is exit-only'
+        elif strategy_pair_exclusion_reason(snap.pair):
+            row['reason'] = 'Stablecoin base asset excluded'
+        elif age > 90:
+            row['reason'] = f'Snapshot stale ({age:.0f}s); cannot enter'
+        elif not snap.bid or not snap.ask or snap.bid <= 0 or snap.ask < snap.bid:
+            row['reason'] = 'Executable bid/ask unavailable'
+        elif row['spread_bps'] is None:
+            row['reason'] = 'Spread unknown'
+        elif row['spread_bps'] > max_spread:
+            row['reason'] = f'Spread {row["spread_bps"]:.2f} bps exceeds {max_spread:.1f} bps'
+        elif snap.quote_turnover_usdt is None or snap.quote_turnover_usdt < min_turnover:
+            row['reason'] = f'24h turnover below {min_turnover:,.0f} USDT'
+        elif len(sample) < 3:
+            row['reason'] = 'Collecting at least 3 recent 5-minute observations'
+        else:
+            newest, prior, older = sample[0], sample[1], sample[2]
+            gaps = [(_scalp_utc(newest.observed_at)-_scalp_utc(prior.observed_at)).total_seconds(),
+                    (_scalp_utc(prior.observed_at)-_scalp_utc(older.observed_at)).total_seconds()]
+            if any(g < 90 or g > 720 for g in gaps) or (now - _scalp_utc(newest.observed_at)).total_seconds() > 720:
+                row['reason'] = 'Recent price history has a gap; wait for fresh samples'
+            else:
+                r5 = (float(newest.last_price) / float(prior.last_price) - 1) * 100
+                r10 = (float(newest.last_price) / float(older.last_price) - 1) * 100
+                side = 'buy' if r5 > 0 else 'sell'
+                hurdle = _entry_cost_hurdle_pct(snap.product, cfg, snap)
+                edge = abs(r5) / hurdle if hurdle and hurdle > 0 else None
+                row.update({'side': side, 'return_5m_pct': r5, 'return_10m_pct': r10,
+                            'cost_hurdle_pct': hurdle, 'edge_multiple': edge})
+                direction = 1 if side == 'buy' else -1
+                if snap.product == 'spot' and side == 'sell':
+                    row['reason'] = 'Spot is long-only; bearish setup not shortable'
+                elif r5 == 0 or r5 * r10 <= 0:
+                    row['reason'] = '5m and 10m momentum disagree'
+                elif abs(r5) < min_move:
+                    row['reason'] = f'5m move {abs(r5):.3f}% below {min_move:.3f}% minimum'
+                elif hurdle is None or edge is None or edge < cost_multiple:
+                    row['reason'] = f'Observed move/cost multiple below {cost_multiple:.2f}x'
+                elif tick_move is not None and tick_move * direction < -max(0.08, abs(r5) * 0.35):
+                    row['reason'] = 'Momentum already reversed since last sample'
+                elif tick_move is not None and tick_move * direction > max(0.75, abs(r5) * 1.5):
+                    row['reason'] = 'Late-entry guard: price already extended beyond signal'
+                else:
+                    row['eligible'] = True
+                    row['reason'] = 'Liquidity/spread pass; 5m+10m momentum aligned and observed move clears cost hurdle'
+        rows.append(row)
+    rows.sort(key=lambda x: (not x['eligible'], -(x['edge_multiple'] or 0), -(x['turnover_usdt'] or 0)))
+    return rows
+
+
+def _scalp_calculate(trade, exit_price, cfg, fx):
+    direction = 1 if trade.side == 'buy' else -1
+    entry_notional = abs(float(trade.quantity or 0) * float(trade.entry_price or 0))
+    exit_notional = abs(float(trade.quantity or 0) * float(exit_price or 0))
+    gross = (float(exit_price) - float(trade.entry_price)) * float(trade.quantity) * direction * fx
+    fee_pct = float(cfg.get('spot_fee_pct' if trade.product == 'spot' else 'futures_fee_pct',
+                            0.15 if trade.product == 'spot' else 0.075)) / 100
+    slip_pct = float(cfg.get('normal_slippage_pct', 0.05)) / 100 if cfg.get('paper_cost_case', 'NORMAL') == 'NORMAL' else float(cfg.get('stress_slippage_pct', 0.12)) / 100
+    fees = (entry_notional + exit_notional) * fee_pct * fx
+    slippage = (entry_notional + exit_notional) * slip_pct * fx
+    # Illustrative conservative reserve: 30% on positive gross VDA transfer gain.
+    # It is not legal tax advice; futures/derivative treatment may differ.
+    tax = max(0.0, gross) * max(0.0, float(cfg.get('scalper_tax_pct', 30))) / 100
+    net = gross - fees - slippage - tax
+    # 1% spot-transfer TDS is shown as a possible cash withholding, not a trading loss.
+    tds = exit_notional * fx * max(0.0, float(cfg.get('scalper_tds_pct', 1))) / 100 if trade.product == 'spot' else 0.0
+    return {'gross': gross, 'fees': fees, 'slippage': slippage, 'tax': tax,
+            'net_after_tax': net, 'tds': tds, 'exit_notional': exit_notional}
+
+
+def run_scalper_cycle(db: Session, now=None):
+    """Manage small, fixed-notional scalping paper positions; never creates live orders."""
+    now = now or utcnow()
+    cfg = read_config(db, 'strategy_config', {})
+    fx = float(cfg.get('inr_per_usdt', 94.75))
+    snapshots = {(s.product, s.pair): s for s in db.scalars(select(MarketSnapshot)).all()}
+    opened_count = 0
+    closed_count = 0
+    open_trades = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open').order_by(ScalpTrade.opened_at.asc())).all()
+    for trade in open_trades:
+        snap = snapshots.get((trade.product, trade.pair))
+        updated = _scalp_utc(snap.updated_at) if snap else None
+        if not snap or not snap.last_price or updated is None or (now - updated).total_seconds() > 90:
+            continue
+        exit_price = float((snap.bid if trade.side == 'buy' else snap.ask) or snap.last_price)
+        mark = _scalp_calculate(trade, exit_price, cfg, fx)
+        denom = max(abs(float(trade.quantity or 0) * float(trade.entry_price or 0)) * fx, 1.0)
+        move_pct = ((exit_price / float(trade.entry_price)) - 1) * (1 if trade.side == 'buy' else -1) * 100
+        trade.best_favorable_pct = max(float(trade.best_favorable_pct or 0), move_pct)
+        trade.worst_adverse_pct = min(float(trade.worst_adverse_pct or 0), move_pct)
+        trade.gross_pnl_inr = mark['gross']
+        trade.fees_inr = mark['fees']
+        trade.slippage_inr = mark['slippage']
+        trade.tax_reserve_inr = mark['tax']
+        trade.tds_estimate_inr = mark['tds']
+        trade.unrealized_net_after_tax_inr = mark['net_after_tax']
+        elapsed_min = max(0.0, (now - _scalp_utc(trade.opened_at)).total_seconds() / 60)
+        net_pct = mark['net_after_tax'] / denom * 100
+        exit_reason = None
+        if net_pct >= float(cfg.get('scalper_target_net_pct', 0.15)):
+            exit_reason = f'take profit: estimated net-after-tax return +{net_pct:.3f}% reached target'
+        elif net_pct <= -abs(float(cfg.get('scalper_stop_net_pct', 0.40))):
+            exit_reason = f'loss stop: modeled net return {net_pct:.3f}% reached loss limit'
+        elif elapsed_min >= float(cfg.get('scalper_max_hold_minutes', 15)):
+            exit_reason = f'time exit after {elapsed_min:.1f} minutes; fast setup did not finish in time'
+        if exit_reason:
+            trade.closed_at = now
+            trade.exit_price = exit_price
+            trade.status = 'closed'
+            trade.exit_reason = exit_reason
+            trade.unrealized_net_after_tax_inr = 0
+            trade.net_after_tax_inr = mark['net_after_tax']
+            trade.metadata_json = json.dumps({**safe_json(trade.metadata_json), 'held_minutes': round(elapsed_min, 2),
+                'best_favorable_pct': trade.best_favorable_pct, 'worst_adverse_pct': trade.worst_adverse_pct,
+                'exit_reason': exit_reason, 'closed_at': now.isoformat()}, separators=(',', ':'), default=str)
+            closed_count += 1
+    if cfg.get('scalper_enabled', True):
+        current_open = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open')).all()
+        live_keys = {(t.product, t.pair) for t in current_open}
+        max_open = max(1, min(10, int(cfg.get('scalper_max_open_positions', 3))))
+        slots = max(0, max_open - len(current_open))
+        if slots:
+            candidates = build_scalper_scan(db, cfg, now)
+            for item in candidates:
+                if slots <= 0:
+                    break
+                if not item['eligible']:
+                    continue
+                key = (item['product'], item['pair'])
+                if key in live_keys:
+                    continue
+                snap = snapshots.get(key)
+                if not snap:
+                    continue
+                side = item['side']
+                entry_price = float((snap.ask if side == 'buy' else snap.bid) or 0)
+                if entry_price <= 0 or not math.isfinite(entry_price):
+                    continue
+                notional = max(10.0, min(500.0, float(cfg.get('scalper_notional_usdt', 100))))
+                quantity = notional / entry_price
+                fee_pct = float(cfg.get('spot_fee_pct' if item['product'] == 'spot' else 'futures_fee_pct',
+                                        0.15 if item['product'] == 'spot' else 0.075)) / 100
+                slip_pct = float(cfg.get('normal_slippage_pct', 0.05)) / 100 if cfg.get('paper_cost_case', 'NORMAL') == 'NORMAL' else float(cfg.get('stress_slippage_pct', 0.12)) / 100
+                db.add(ScalpTrade(opened_at=now, product=item['product'], pair=item['pair'], side=side,
+                    quantity=quantity, entry_price=entry_price, notional_usdt=notional, status='open',
+                    entry_score=float(item.get('edge_multiple') or 0), cost_hurdle_pct=float(item.get('cost_hurdle_pct') or 0),
+                    spread_bps=float(item.get('spread_bps') or 0),
+                    fees_inr=notional * fee_pct * fx, slippage_inr=notional * slip_pct * fx,
+                    metadata_json=json.dumps({'scalper_version': SCALPER_VERSION, 'entry_reason': item['reason'],
+                        'return_5m_pct': item.get('return_5m_pct'), 'return_10m_pct': item.get('return_10m_pct'),
+                        'tick_move_pct': item.get('tick_move_pct'), 'entry_bid': snap.bid, 'entry_ask': snap.ask,
+                        'expected_move_not_forecast': abs(float(item.get('return_5m_pct') or 0))}, separators=(',', ':'), default=str)))
+                live_keys.add(key)
+                slots -= 1
+                opened_count += 1
+    closed = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'closed')).all()
+    wins = [float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0) > 0]
+    losses = [float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0) < 0]
+    runtime = read_config(db, 'runtime', {})
+    runtime['scalper_last_cycle'] = {'at': now.isoformat(), 'status': 'ok',
+        'enabled': bool(cfg.get('scalper_enabled', True)), 'opened': opened_count, 'closed': closed_count,
+        'open': len(db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open')).all()),
+        'closed_count': len(closed), 'rolling_profit_factor_after_tax': (sum(wins) / abs(sum(losses)) if losses else None),
+        'target_profit_factor': 1.25, 'version': SCALPER_VERSION}
+    write_config(db, 'runtime', runtime)
+    db.flush()
+    return {'ok': True, 'opened': opened_count, 'closed': closed_count,
+            'open': runtime['scalper_last_cycle']['open'], 'closed_count': len(closed),
+            'profit_factor_after_tax': runtime['scalper_last_cycle']['rolling_profit_factor_after_tax']}
