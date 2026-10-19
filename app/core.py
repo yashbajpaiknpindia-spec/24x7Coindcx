@@ -1238,6 +1238,18 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
     cfg['scalper_max_open_positions']=int(cfg.get(f'scalper_{mode}_max_open_positions',cfg.get('scalper_max_open_positions',3)))
     lane_enabled=bool(cfg.get('scalper_enabled',True) and cfg.get(f'scalper_{mode}_enabled',mode=='research'))
     fx=float(cfg.get('inr_per_usdt',94.75))
+    if mode=='capital':
+        capital_limit=(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10.0))/100.0)
+        requested_notional=max(0.0,float(cfg.get('scalper_capital_notional_usdt',30)))
+        effective_notional=min(500.0,requested_notional,capital_limit)
+        # Scan depth against the actual capital-limited ticket size. If the
+        # configured capital cannot support the $10 minimum ticket, keep exits
+        # running but suppress new entries rather than exceeding the allocation.
+        if effective_notional < 10.0:
+            cfg['scalper_notional_usdt']=10.0
+            lane_enabled=False
+        else:
+            cfg['scalper_notional_usdt']=effective_notional
     snapshots={(s.product,s.pair):s for s in db.scalars(select(MarketSnapshot)).all()}
     opened_count=closed_count=0
     open_trades=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open').order_by(ScalpTrade.opened_at.asc())).all()
