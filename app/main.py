@@ -602,8 +602,11 @@ def scalper_page(request: Request):
             t.return_5m=t.meta.get('return_5m_pct')
             t.return_10m=t.meta.get('return_10m_pct')
             t.return_previous_5m=t.meta.get('return_previous_5m_pct')
+    entries_paused=cfg.get('scalper_strategy_validation_passed') is not True
+    entry_pause_reason='No strategy passed the 30-day blind acceptance gate; scanning, candidate audits and exits for existing positions continue.' if entries_paused else None
     return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',
-        cfg=cfg,runtime=runtime,candidates=candidates[:120],trades=trades,scalper_stats=stats,lane_stats=lane_stats))
+        cfg=cfg,runtime=runtime,candidates=candidates[:120],trades=trades,scalper_stats=stats,lane_stats=lane_stats,
+        entries_paused=entries_paused,entry_pause_reason=entry_pause_reason))
 
 
 @app.get('/scalper-review', response_class=HTMLResponse)
@@ -802,8 +805,11 @@ def scalper_review_page(request: Request):
             'legacy_truncated_snapshots':legacy_truncated_snapshots,'relaxed_reversal_episodes':len(relaxed_reversal),
             'relaxed_reversal_target_first':relaxed_target_first,'relaxed_reversal_stop_first':relaxed_stop_first,
             'scan_start':scan_cutoff}
+    entries_paused=not bool(cfg.get('scalper_strategy_validation_passed',False))
+    entry_pause_reason='No strategy passed the 30-day blind acceptance gate; scanning, candidate audits and exits for existing positions continue.' if entries_paused else None
     return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
-        cfg=cfg,lane_stats=lane_stats,model_stats=model_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
+        cfg=cfg,lane_stats=lane_stats,model_stats=model_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta,
+        entries_paused=entries_paused,entry_pause_reason=entry_pause_reason))
 
 
 @app.post('/scalper/start')
@@ -812,6 +818,10 @@ def scalper_start(request: Request):
         return RedirectResponse('/login',status_code=303)
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
+        if cfg.get('scalper_strategy_validation_passed') is not True:
+            log_event(db,'Scalper start denied: no strategy passed the 30-day blind acceptance gate. Scanner/audit and existing-position exits remain active.','WARNING','scalper')
+            db.commit()
+            return RedirectResponse('/scalper?validation_required=1',status_code=303)
         cfg['scalper_enabled']=True
         write_config(db,'strategy_config',cfg)
         log_event(db,'Fast scalping paper simulation enabled. No exchange orders were sent.','INFO','scalper')

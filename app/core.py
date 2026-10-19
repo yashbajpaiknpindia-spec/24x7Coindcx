@@ -1244,7 +1244,8 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
     cfg=dict(cfg_override or read_config(db,'strategy_config',{}))
     cfg['scalper_notional_usdt']=float(cfg.get(f'scalper_{mode}_notional_usdt',cfg.get('scalper_notional_usdt',100)))
     cfg['scalper_max_open_positions']=int(cfg.get(f'scalper_{mode}_max_open_positions',cfg.get('scalper_max_open_positions',3)))
-    lane_enabled=bool(cfg.get('scalper_enabled',True) and cfg.get(f'scalper_{mode}_enabled',mode=='research'))
+    validation_passed=cfg.get('scalper_strategy_validation_passed') is True
+    lane_enabled=bool(cfg.get('scalper_enabled',True) and cfg.get(f'scalper_{mode}_enabled',mode=='research') and validation_passed)
     fx=float(cfg.get('inr_per_usdt',94.75))
     if mode=='capital':
         capital_limit=(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10.0))/100.0)
@@ -1354,7 +1355,10 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
     return {'ok':True,'mode':mode,'opened':opened_count,'closed':closed_count,'open':len(lane_open),
         'closed_count':len(closed),'profit_factor_after_tax':(sum(wins)/abs(sum(losses)) if losses else None),
         'net_after_tax_inr':sum(float(t.net_after_tax_inr or 0) for t in closed),
-        'open_net_inr':sum(float(t.unrealized_net_after_tax_inr or 0) for t in lane_open),'candidates':candidates}
+        'open_net_inr':sum(float(t.unrealized_net_after_tax_inr or 0) for t in lane_open),
+        'entries_enabled':lane_enabled,
+        'entry_pause_reason':None if validation_passed else 'No strategy passed the 30-day blind test; scanner/audit and existing-position exits remain active.',
+        'candidates':candidates}
 
 
 def run_scalper_cycle(db: Session, now=None):
@@ -1370,10 +1374,14 @@ def run_scalper_cycle(db: Session, now=None):
     wins=[float(t.net_after_tax_inr or 0) for t in closed if float(t.net_after_tax_inr or 0)>0]
     losses=[float(t.net_after_tax_inr or 0) for t in closed if float(t.net_after_tax_inr or 0)<0]
     opened=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open')).all()
+    validation_passed=base_cfg.get('scalper_strategy_validation_passed') is True
     runtime['scalper_last_cycle']={'at':now.isoformat(),'status':'ok','enabled':bool(base_cfg.get('scalper_enabled',True)),
+        'entry_validation_passed':validation_passed,
+        'entries_enabled':any(x.get('entries_enabled',False) for x in lanes.values()),
+        'entry_pause_reason':None if validation_passed else 'No strategy passed the 30-day blind test; paper entries are paused while scans and existing-position exits continue.',
         'opened':sum(x['opened'] for x in lanes.values()),'closed':sum(x['closed'] for x in lanes.values()),
         'open':len(opened),'closed_count':len(closed),'rolling_profit_factor_after_tax':sum(wins)/abs(sum(losses)) if losses else None,
-        'target_profit_factor':1.25,'version':'0.3.0-cost-stop-budget-guard'}
+        'target_profit_factor':1.25,'version':'0.3.1-validation-gate'}
     write_config(db,'runtime',runtime); db.flush()
     return {'ok':True,'opened':runtime['scalper_last_cycle']['opened'],'closed':runtime['scalper_last_cycle']['closed'],
         'open':len(opened),'closed_count':len(closed),'profit_factor_after_tax':runtime['scalper_last_cycle']['rolling_profit_factor_after_tax'],
