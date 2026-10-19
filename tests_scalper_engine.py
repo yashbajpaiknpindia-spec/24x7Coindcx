@@ -19,6 +19,7 @@ Base.metadata.create_all(bind=engine)
 CFG = {
     "inr_per_usdt": 94.75,
     "scalper_enabled": True,
+    "scalper_strategy_validation_passed": True,
     "scalper_notional_usdt": 100,
     "scalper_max_open_positions": 3,
     "scalper_min_turnover_usdt": 1_000_000,
@@ -189,7 +190,43 @@ def run():
             })()
             futures_mark = _scalp_calculate(futures, 101.0, CFG, 94.75)
             assert futures_mark["tax"] > 0 and futures_mark["tds"] == 0, futures_mark
-            print("SCALPER REGRESSION PASSED: net-target gate, book depth, dual-track isolation, bid/ask execution, fee GST, fees/slippage, tax reserve, target exit and no futures TDS.")
+
+            # Validation gate: when no strategy has passed the 30-day blind
+            # acceptance test, candidate scanning remains active but new paper
+            # entries are blocked in both lanes; existing positions still exit.
+            shadow_now = now + timedelta(seconds=30)
+            db.add(MarketSnapshot(
+                product="futures", pair="B-NEW_USDT", last_price=101.0,
+                bid=100.99, ask=101.01, quote_turnover_usdt=50_000_000,
+                liquidity_source="test", active=True, exit_only=False,
+                updated_at=shadow_now, raw_json=json.dumps({"futures_orderbook":{
+                    "bids":{"100.99":"20","100.98":"20"},
+                    "asks":{"101.01":"20","101.02":"20"}}}),
+            ))
+            for observed_at, price in (
+                (shadow_now - timedelta(minutes=10), 100.0),
+                (shadow_now - timedelta(minutes=5), 100.5),
+                (shadow_now - timedelta(seconds=10), 101.0),
+            ):
+                db.add(MarketObservation(
+                    observed_at=observed_at, product="futures", pair="B-NEW_USDT",
+                    last_price=price, bid=price-0.01, ask=price+0.01,
+                    active=True, source_updated_at=observed_at,
+                ))
+            cfg_shadow = dict(CFG)
+            cfg_shadow["scalper_strategy_validation_passed"] = False
+            db.get(ConfigKV, "strategy_config").value = json.dumps(cfg_shadow)
+            db.commit()
+            shadow_candidates = build_scalper_scan(db, cfg_shadow, shadow_now)
+            new_candidate = next(x for x in shadow_candidates if x["pair"] == "B-NEW_USDT")
+            assert new_candidate["eligible"], new_candidate
+            shadow_cycle = run_scalper_cycle(db, shadow_now)
+            assert shadow_cycle["opened"] == 0, shadow_cycle
+            assert not shadow_cycle["lanes"]["research"]["entries_enabled"], shadow_cycle
+            assert not shadow_cycle["lanes"]["capital"]["entries_enabled"], shadow_cycle
+            assert "blind test" in shadow_cycle["lanes"]["research"]["entry_pause_reason"].lower(), shadow_cycle
+            assert db.query(ScalpScanSnapshot).count() >= 4, "Shadow-only scans must still be retained"
+            print("SCALPER REGRESSION PASSED: cost-stop guard, blind-validation entry pause, shadow scans, existing exits, dual-track isolation, quote-side execution, fee GST, fees/slippage, tax reserve and TDS.")
     finally:
         try:
             Path(_tmp.name).unlink()
