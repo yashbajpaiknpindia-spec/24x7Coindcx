@@ -654,7 +654,7 @@ def scalper_review_page(request: Request):
         obs_by_pair={}
         for obs in obs_rows:
             obs_by_pair.setdefault((obs.product,obs.pair),[]).append(obs)
-        rejected=[]
+        raw_candidates=[]
         full_coverage_snapshots=0
         legacy_truncated_snapshots=0
         for snap in scans:
@@ -663,74 +663,82 @@ def scalper_review_page(request: Request):
             mode=snap.mode or 'research'
             try: candidates=json.loads(snap.candidates_json or '[]')
             except Exception: candidates=[]
-            if any(c.get('_audit_coverage') == 'full-universe-v1' for c in candidates):
+            if any(isinstance(c,dict) and c.get('_audit_coverage') == 'full-universe-v1' for c in candidates):
                 full_coverage_snapshots += 1
             else:
                 legacy_truncated_snapshots += 1
             mode_notional=float(cfg.get('scalper_capital_notional_usdt',30) if mode=='capital' else cfg.get('scalper_research_notional_usdt',100))
             mode_notional=min(mode_notional,(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10))/100)) if mode=='capital' else mode_notional
             for cand in candidates:
-                if cand.get('eligible'): continue
+                if not isinstance(cand,dict) or cand.get('eligible'): continue
                 side=cand.get('side')
                 if side not in ('buy','sell') or not cand.get('price'): continue
-                entry=float(cand.get('entry_price_estimate') or (cand.get('ask') if side=='buy' else cand.get('bid') if cand.get('bid') else cand.get('price')) or cand.get('price'))
-                if entry<=0: continue
-                observations=obs_by_pair.get((cand.get('product'),cand.get('pair')),[])
-                sampled={}
-                for mins in (5,10):
-                    target=at+timedelta(minutes=mins)
-                    pool=[o for o in observations if abs((_as_utc(o.observed_at)-target).total_seconds())<=180 and _as_utc(o.observed_at)>at]
-                    if not pool: sampled[mins]=None; continue
-                    obs=min(pool,key=lambda o:abs((_as_utc(o.observed_at)-target).total_seconds()))
-                    exit_price=(obs.bid if side=='buy' else obs.ask) or obs.last_price
-                    if not exit_price or exit_price<=0: sampled[mins]=None; continue
-                    TradeLike=type('TradeLike',(),{})
-                    fake=TradeLike(); fake.product=cand.get('product'); fake.side=side; fake.entry_price=entry
-                    fake.quantity=mode_notional/entry
-                    mark=_scalp_calculate(fake,float(exit_price),cfg,fx)
-                    sampled[mins]={'net':mark['net_after_tax'],'at':obs.observed_at}
-                net5_pct=(sampled[5]['net']/(mode_notional*fx)*100) if sampled[5] and mode_notional>0 and fx>0 else None
-                net10_pct=(sampled[10]['net']/(mode_notional*fx)*100) if sampled[10] and mode_notional>0 and fx>0 else None
-                target_pct=float(cfg.get('scalper_target_net_pct',0.15))
-                stop_pct=abs(float(cfg.get('scalper_stop_net_pct',0.40)))
-                outcome='Insufficient samples'
-                for minute, pct in ((5,net5_pct),(10,net10_pct)):
-                    if pct is None: continue
-                    if pct >= target_pct:
-                        outcome=f'Target threshold first sampled (+{pct:.3f}% at {minute}m)'
-                        break
-                    if pct <= -stop_pct:
-                        outcome=f'Stop threshold first sampled ({pct:.3f}% at {minute}m)'
-                        break
-                else:
-                    valid_pcts=[p for p in (net5_pct,net10_pct) if p is not None]
-                    if len(valid_pcts)==2: outcome='Sampled; neither target nor stop first'
-                    elif valid_pcts and max(valid_pcts)>0: outcome='Positive sample; target not reached'
-                    elif valid_pcts: outcome='Sampled; no positive net'
-                rejected.append({'mode':mode,'scanned_at':snap.scanned_at,'pair':cand.get('pair'),
-                    'product':cand.get('product'),'side':side,'r5':cand.get('return_5m_pct'),
-                    'r10':cand.get('return_10m_pct'),'spread':cand.get('spread_bps'),
-                    'turnover':cand.get('turnover_usdt'),'depth':cand.get('entry_depth_10_usdt'),
-                    'reason':cand.get('reason'),'net5':sampled[5]['net'] if sampled[5] else None,
-                    'net10':sampled[10]['net'] if sampled[10] else None,
-                    'net5_pct':net5_pct,'net10_pct':net10_pct,'outcome':outcome,
-                    'at5':sampled[5]['at'] if sampled[5] else None,'at10':sampled[10]['at'] if sampled[10] else None})
-        raw_rejected_count=len(rejected)
-        # Collapse repeated scans of the same product/pair/side into episodes. Keep
-        # the FIRST sample in each 15-minute episode so later repeated scans cannot
-        # cherry-pick the best-looking entry or inflate the missed-opportunity count.
-        rejected.sort(key=lambda x:_as_utc(x['scanned_at']) or now)
-        episodes=[]
+                raw_candidates.append({'mode':mode,'scanned_at':snap.scanned_at,'candidate':cand,'mode_notional':mode_notional})
+        raw_rejected_count=len(raw_candidates)
+        # Deduplicate BEFORE evaluating hypothetical outcomes. This keeps the first
+        # scan in each 15-minute episode and avoids expensive, hindsight-biased
+        # calculations for every repeated scan of the same signal.
+        raw_candidates.sort(key=lambda x:_as_utc(x['scanned_at']) or now)
+        episode_candidates=[]
         last_seen={}
-        for item in rejected:
-            key=(item['mode'],item['product'],item['pair'],item['side'])
+        for item in raw_candidates:
+            cand=item['candidate']
+            key=(item['mode'],cand.get('product'),cand.get('pair'),cand.get('side'))
             at=_as_utc(item['scanned_at'])
             previous=last_seen.get(key)
             if previous is not None and at is not None and (at-previous).total_seconds()<=900:
                 continue
-            episodes.append(item)
+            episode_candidates.append(item)
             if at is not None: last_seen[key]=at
-        rejected=episodes
+        rejected=[]
+        for episode in episode_candidates:
+            cand=episode['candidate']
+            mode=episode['mode']
+            at=_as_utc(episode['scanned_at'])
+            mode_notional=episode['mode_notional']
+            side=cand.get('side')
+            entry=float(cand.get('entry_price_estimate') or (cand.get('ask') if side=='buy' else cand.get('bid') if cand.get('bid') else cand.get('price')) or cand.get('price'))
+            if entry<=0: continue
+            observations=obs_by_pair.get((cand.get('product'),cand.get('pair')),[])
+            sampled={}
+            for mins in (5,10):
+                target=at+timedelta(minutes=mins)
+                pool=[o for o in observations if abs((_as_utc(o.observed_at)-target).total_seconds())<=180 and _as_utc(o.observed_at)>at]
+                if not pool: sampled[mins]=None; continue
+                obs=min(pool,key=lambda o:abs((_as_utc(o.observed_at)-target).total_seconds()))
+                exit_price=(obs.bid if side=='buy' else obs.ask) or obs.last_price
+                if not exit_price or exit_price<=0: sampled[mins]=None; continue
+                TradeLike=type('TradeLike',(),{})
+                fake=TradeLike(); fake.product=cand.get('product'); fake.side=side; fake.entry_price=entry
+                fake.quantity=mode_notional/entry
+                mark=_scalp_calculate(fake,float(exit_price),cfg,fx)
+                sampled[mins]={'net':mark['net_after_tax'],'at':obs.observed_at}
+            net5_pct=(sampled[5]['net']/(mode_notional*fx)*100) if sampled[5] and mode_notional>0 and fx>0 else None
+            net10_pct=(sampled[10]['net']/(mode_notional*fx)*100) if sampled[10] and mode_notional>0 and fx>0 else None
+            target_pct=float(cfg.get('scalper_target_net_pct',0.15))
+            stop_pct=abs(float(cfg.get('scalper_stop_net_pct',0.40)))
+            outcome='Insufficient samples'
+            for minute, pct in ((5,net5_pct),(10,net10_pct)):
+                if pct is None: continue
+                if pct >= target_pct:
+                    outcome=f'Target threshold first sampled (+{pct:.3f}% at {minute}m)'
+                    break
+                if pct <= -stop_pct:
+                    outcome=f'Stop threshold first sampled ({pct:.3f}% at {minute}m)'
+                    break
+            else:
+                valid_pcts=[p for p in (net5_pct,net10_pct) if p is not None]
+                if len(valid_pcts)==2: outcome='Sampled; neither target nor stop first'
+                elif valid_pcts and max(valid_pcts)>0: outcome='Positive sample; target not reached'
+                elif valid_pcts: outcome='Sampled; no positive net'
+            rejected.append({'mode':mode,'scanned_at':episode['scanned_at'],'pair':cand.get('pair'),
+                'product':cand.get('product'),'side':side,'r5':cand.get('return_5m_pct'),
+                'r10':cand.get('return_10m_pct'),'spread':cand.get('spread_bps'),
+                'turnover':cand.get('turnover_usdt'),'depth':cand.get('entry_depth_10_usdt'),
+                'reason':cand.get('reason'),'net5':sampled[5]['net'] if sampled[5] else None,
+                'net10':sampled[10]['net'] if sampled[10] else None,
+                'net5_pct':net5_pct,'net10_pct':net10_pct,'outcome':outcome,
+                'at5':sampled[5]['at'] if sampled[5] else None,'at10':sampled[10]['at'] if sampled[10] else None})
         target_first=sum(1 for x in rejected if x['outcome'].startswith('Target threshold first'))
         positive_samples=sum(1 for x in rejected if any(p is not None and p>0 for p in (x['net5_pct'],x['net10_pct'])))
         rejected.sort(key=lambda x:max(x['net5'] if x['net5'] is not None else -1e18,x['net10'] if x['net10'] is not None else -1e18),reverse=True)
