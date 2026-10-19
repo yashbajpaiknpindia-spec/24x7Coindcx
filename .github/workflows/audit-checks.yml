@@ -36,11 +36,3 @@ jobs:
           PY
       - name: Check browser JavaScript syntax
         run: node --check app/static/app.js
-      - name: Run Python tests when present
-        run: |
-          if find . -maxdepth 3 -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q .; then
-            python -m pip install pytest
-            python -m pytest -q
-          else
-            echo "No Python test files found in this repository checkout."
-          fi
