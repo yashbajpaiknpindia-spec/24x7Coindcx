@@ -774,6 +774,29 @@ def capital_page(request: Request):
     warnings=_json_container(snap.warnings_json,[]) if snap else []
     return templates.TemplateResponse('capital.html',context(request,'capital','Capital Deployment',snapshot=snap,spot_balances=spot if isinstance(spot,list) else [],futures_wallets=wallets if isinstance(wallets,list) else [],futures_positions=futures if isinstance(futures,list) else [],snapshot_warnings=warnings if isinstance(warnings,list) else [],strategy_positions=pos_rows,deployed=deployed,paper_equity=eq,runtime=runtime,fx=env_float('INR_PER_USDT',94.75)))
 
+def _paper_trade_diagnosis(trade):
+    metadata=safe_json(trade.metadata_json or '{}')
+    if trade.status != 'closed':
+        return 'Open paper position; outcome is not known yet.'
+    if metadata.get('diagnosis'):
+        return str(metadata['diagnosis'])
+    gross=float(trade.gross_pnl_inr or 0)
+    net=float(trade.net_pnl_inr or 0)
+    costs=float(trade.fees_inr or 0)+float(trade.slippage_inr or 0)+float(trade.funding_inr or 0)
+    reason=str(trade.reason or metadata.get('exit_reason') or 'exit reason not recorded')
+    if gross > 0 and net <= 0:
+        return 'Gross trade gain was erased by modeled fees/slippage/funding.'
+    if 'hard stop' in reason.lower() or 'persistent loss' in reason.lower():
+        return 'Protective stop exit. Older trade has no full sampled path, so the exact first-adverse time is unknown.'
+    if 'daily rebalance' in reason.lower():
+        return 'Closed by daily rebalance, not a price-triggered profit target; older trade has no full intratrade path to prove whether profit was given back.'
+    if 'signal no longer' in reason.lower() or 'direction changed' in reason.lower():
+        return 'Closed after signal/cost/trend eligibility changed; older trade has no full intratrade path to prove whether profit was given back.'
+    if net < 0:
+        return 'Net loss at exit; older trade path is incomplete, so entry quality versus late exit cannot be determined reliably.'
+    return 'Net-positive closed trade. Intratrade excursion tracking was not available for this older record.'
+
+
 @app.get('/ledger', response_class=HTMLResponse)
 def ledger_page(request: Request):
     if not authed(request): return RedirectResponse('/login', status_code=303)
@@ -783,8 +806,20 @@ def ledger_page(request: Request):
         counts={}
         for status,count in db.execute(select(LedgerEntry.reconciliation_status,func.count(LedgerEntry.id)).group_by(LedgerEntry.reconciliation_status)).all(): counts[status]=count
         runtime=read_config(db,'runtime',{})
+        paper_trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital'])).order_by(desc(Trade.created_at)).limit(250)).all()
+        paper_positions=db.scalars(select(PaperPosition).where(PaperPosition.is_open==True).order_by(desc(PaperPosition.opened_at))).all()
+        capital_positions=db.scalars(select(PaperModePosition).where(PaperModePosition.is_open==True).order_by(desc(PaperModePosition.opened_at))).all()
+        cfg=read_config(db,'strategy_config',{})
+    now_utc=datetime.now(timezone.utc)
+    fx=float(cfg.get('inr_per_usdt',94.75))
+    for t in paper_trades:
+        opened=t.created_at.replace(tzinfo=timezone.utc) if t.created_at and t.created_at.tzinfo is None else t.created_at
+        ended=t.closed_at.replace(tzinfo=timezone.utc) if t.closed_at and t.closed_at.tzinfo is None else (t.closed_at or now_utc)
+        t.held_minutes=max(0,(ended-opened).total_seconds()/60) if opened else 0
+        t.invested_usdt=abs(float(t.quantity or 0)*float(t.entry_price or 0))
+        t.diagnosis=_paper_trade_diagnosis(t)
     needs_review=sum(v for k,v in counts.items() if k not in ('reconciled',))
-    return templates.TemplateResponse('ledger.html',context(request,'ledger','Execution Ledger',entries=entries,fills=fills,status_counts=counts,needs_review=needs_review,runtime=runtime))
+    return templates.TemplateResponse('ledger.html',context(request,'ledger','Execution Ledger',entries=entries,fills=fills,status_counts=counts,needs_review=needs_review,runtime=runtime,paper_trades=paper_trades,paper_positions=paper_positions,capital_positions=capital_positions))
 
 @app.get('/api/ledger.csv')
 def ledger_csv(request: Request):
