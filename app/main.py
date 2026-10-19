@@ -230,8 +230,46 @@ def loss_review_page(request: Request):
                 obs_end=min(closed+timedelta(days=7,minutes=15),now)
                 obs_rows=db.scalars(select(MarketObservation).where(
                     MarketObservation.product==t.product,MarketObservation.pair==t.pair,
-                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=obs_end
+                    MarketObservation.observed_at>=(opened-timedelta(minutes=30) if opened else closed),
+                    MarketObservation.observed_at<=obs_end
                 ).order_by(MarketObservation.observed_at.asc())).all()
+
+            # Diagnose entry quality using the actual stored 5-minute market samples
+            # immediately before entry and during the trade. Do not guess when the path is absent.
+            entry_samples=[o for o in obs_rows if opened and closed and opened<=_as_utc(o.observed_at)<=closed and o.last_price and float(o.last_price)>0]
+            prior_samples=[o for o in obs_rows if opened and _as_utc(o.observed_at)<opened and _as_utc(o.observed_at)>=opened-timedelta(minutes=30) and o.last_price and float(o.last_price)>0]
+            t.entry_path='No sufficiently sampled entry-to-exit path; signal versus timing cannot be separated.'
+            if entry_samples and t.entry_price and float(t.entry_price)>0:
+                direction=1 if t.side=='buy' else -1
+                signed_returns=[((float(o.last_price)/float(t.entry_price))-1)*direction*100 for o in entry_samples]
+                best_favorable=max(((((float(o.last_price)/float(t.entry_price))-1)*100) if t.side=='buy' else (1-float(o.last_price)/float(t.entry_price))*100) for o in entry_samples)
+                worst_adverse=min(((((float(o.last_price)/float(t.entry_price))-1)*100) if t.side=='buy' else (1-float(o.last_price)/float(t.entry_price))*100) for o in entry_samples)
+                target_first=opened+timedelta(minutes=15)
+                first_sample=min(entry_samples,key=lambda o:abs((_as_utc(o.observed_at)-target_first).total_seconds()))
+                first_minutes=(_as_utc(first_sample.observed_at)-opened).total_seconds()/60
+                first15_move=((float(first_sample.last_price)/float(t.entry_price))-1)*direction*100
+                pre_extreme=None
+                near_extreme=False
+                if prior_samples:
+                    pre_extreme=max(float(o.last_price) for o in prior_samples) if t.side=='buy' else min(float(o.last_price) for o in prior_samples)
+                    near_extreme=pre_extreme>0 and abs(float(t.entry_price)/pre_extreme-1)*100<=0.30
+                t.entry_path=(f'Entry path samples: {len(entry_samples)}; first sample near +15m at {first_minutes:.0f}m: {first15_move:+.2f}%; '
+                              f'best favorable mark {best_favorable:+.2f}%; worst adverse mark {worst_adverse:+.2f}%; '
+                              f'entry within 0.30% of prior 30m sampled extreme: {"yes" if near_extreme else "no"}.')
+                diagnosis=str(t.diagnosis or '')
+                exit_reason=str(t.reason or '').lower()
+                if 'ENTRY-SIGNAL MISMATCH' not in diagnosis:
+                    if first_minutes>=5 and first_minutes<=25 and first15_move<=-0.35 and best_favorable<0.20:
+                        t.diagnosis=('LIKELY BAD ENTRY / EARLY ADVERSE MOVE: price was down at least 0.35% by the first ~15m mark '
+                                     'and never showed a meaningful favorable sampled excursion. '+t.entry_path)
+                    elif best_favorable>=0.40 and actual_after_tax<0 and ('rebalance' in exit_reason or 'signal no longer' in exit_reason or 'direction changed' in exit_reason):
+                        t.diagnosis=('POSSIBLE PROFIT GIVEBACK: the sampled in-trade path had a +0.40% or better favorable mark '
+                                     'before the actual net-negative exit; inspect why no profit lock fired. '+t.entry_path)
+                    elif near_extreme and actual_after_tax<0 and 'POSSIBLE LATE ENTRY' not in diagnosis:
+                        t.diagnosis=('POSSIBLE LATE ENTRY: entry was within 0.30% of the preceding 30m sampled extreme and the trade lost; '
+                                     'this is a warning signal, not proof. '+t.entry_path)
+                    else:
+                        t.diagnosis=(diagnosis+' '+t.entry_path).strip()
 
             def hypothetical_mark(obs):
                 obs_time=_as_utc(obs.observed_at)
@@ -265,7 +303,10 @@ def loss_review_page(request: Request):
                 path_end=target if reached else now
                 path_marks=[]
                 for observation in obs_rows:
-                    if _as_utc(observation.observed_at)>path_end:
+                    obs_time=_as_utc(observation.observed_at)
+                    if obs_time<=closed:
+                        continue
+                    if obs_time>path_end:
                         break
                     mark=hypothetical_mark(observation)
                     if mark:
@@ -330,9 +371,6 @@ def loss_review_page(request: Request):
                 if row['potential_recovery']: summ['potential_recovery']+=1
             t.review_rows=horizon_rows
             rows.append(t)
-        for summ in summaries.values():
-            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
-            summ.pop('_deltas',None)
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
