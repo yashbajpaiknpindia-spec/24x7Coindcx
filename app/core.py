@@ -1082,6 +1082,7 @@ def run_scalper_cycle(db: Session, now=None):
     snapshots = {(s.product, s.pair): s for s in db.scalars(select(MarketSnapshot)).all()}
     opened_count = 0
     closed_count = 0
+    closed_keys_this_cycle = set()
     open_trades = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open').order_by(ScalpTrade.opened_at.asc())).all()
     for trade in open_trades:
         snap = snapshots.get((trade.product, trade.pair))
@@ -1120,6 +1121,7 @@ def run_scalper_cycle(db: Session, now=None):
                 'best_favorable_pct': trade.best_favorable_pct, 'worst_adverse_pct': trade.worst_adverse_pct,
                 'exit_reason': exit_reason, 'closed_at': now.isoformat()}, separators=(',', ':'), default=str)
             closed_count += 1
+            closed_keys_this_cycle.add((trade.product, trade.pair))
     # autoflush is disabled for this app's SQLAlchemy sessions; flush exits before counting free slots.
     db.flush()
     if cfg.get('scalper_enabled', True):
@@ -1135,7 +1137,7 @@ def run_scalper_cycle(db: Session, now=None):
                 if not item['eligible']:
                     continue
                 key = (item['product'], item['pair'])
-                if key in live_keys:
+                if key in live_keys or key in closed_keys_this_cycle:
                     continue
                 snap = snapshots.get(key)
                 if not snap:
