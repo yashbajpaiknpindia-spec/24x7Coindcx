@@ -28,6 +28,7 @@ CFG = {
     "scalper_target_net_pct": 0.15,
     "scalper_stop_net_pct": 0.40,
     "scalper_max_hold_minutes": 15,
+    "scalper_pair_cooldown_minutes": 5,
     "scalper_spot_tax_pct": 30,
     "scalper_futures_tax_pct": 30,
     "scalper_tds_pct": 1,
@@ -90,6 +91,7 @@ def run():
             assert trade.net_after_tax_inr > 0
             assert "take profit" in trade.exit_reason.lower(), trade.exit_reason
             assert trade.tds_estimate_inr == 0, "Futures must not show spot transfer TDS"
+            assert closed["opened"] == 0, "The same pair must not re-open immediately after a close"
     
             # Verify taxable assumptions are product-aware and TDS stays display-only.
             spot = type("TradeLike", (), {
