@@ -21,12 +21,12 @@
   <div class="stat-card"><div class="stat-top"><span>Markets discovered</span><span class="stat-icon">⌕</span></div><div class="stat-value" id="scan-count">{{runtime.get('scan_universe_count',0)}}</div><div class="stat-foot">Dynamic live USDT universe, not just the seed 14</div></div>
   <div class="stat-card"><div class="stat-top"><span>Fresh snapshots</span><span class="stat-icon">◉</span></div><div class="stat-value" id="fresh-count">{{summary.fresh_markets}}</div><div class="stat-foot"><span id="snapshot-count">{{summary.market_count}}</span> stored spot/futures snapshots</div></div>
   <div class="stat-card"><div class="stat-top"><span>Candle-ready records</span><span class="stat-icon">▥</span></div><div class="stat-value" id="candle-count">{{(runtime.get('paper_candle_diagnostics',{}).get('candle_ready_total',0))}}</div><div class="stat-foot">Product/pair records with enough completed 1-hour candles</div></div>
-  <div class="stat-card"><div class="stat-top"><span>Worker heartbeat</span><span class="stat-icon">♥</span></div><div class="stat-value" id="worker-status">{{'Online' if runtime.get('worker_last_heartbeat') else 'Not seen'}}</div><div class="stat-foot" id="worker-heartbeat">{{runtime.get('worker_last_heartbeat','No heartbeat recorded')}}</div></div>
+  <div class="stat-card"><div class="stat-top"><span>Worker heartbeat</span><span class="stat-icon">♥</span></div><div class="stat-value" id="worker-status">{{'Online' if runtime.get('worker_last_heartbeat') else 'Not seen'}}</div><div class="stat-foot" id="worker-heartbeat">{{runtime.get('worker_last_heartbeat')|ist if runtime.get('worker_last_heartbeat') else 'No heartbeat recorded'}}</div></div>
  </div>
  <div class="connection-details">
   <div><span>Paper cycle status</span><b id="cycle-status">{{runtime.get('paper_cycle_status','waiting')|upper}}</b></div>
-  <div><span>Last cycle attempt</span><b id="cycle-attempt">{{runtime.get('paper_cycle_attempted_at','Not attempted')}}</b></div>
-  <div><span>Last scan refresh</span><b id="market-refresh-at">{{runtime.get('last_market_refresh','Not refreshed')}}</b></div>
+  <div><span>Last cycle attempt</span><b id="cycle-attempt">{{runtime.get('paper_cycle_attempted_at')|ist if runtime.get('paper_cycle_attempted_at') else 'Not attempted'}}</b></div>
+  <div><span>Last scan refresh</span><b id="market-refresh-at">{{runtime.get('last_market_refresh')|ist if runtime.get('last_market_refresh') else 'Not refreshed'}}</b></div>
   <div><span>Candle fetch errors</span><b id="candle-errors">{{runtime.get('paper_candle_diagnostics',{}).get('fetch_error_count',0)}}</b></div>
  </div>
  <div class="panel-note" id="cycle-message">{{runtime.get('paper_cycle_message','No cycle result yet. Start queues an immediate cycle.') }}</div>
@@ -163,8 +163,8 @@
    const err=$('scan-results-error'),workerAge=d.worker_heartbeat_age_seconds;
    const workerOnline=workerAge!==null&&workerAge!==undefined&&workerAge<150;
    const refreshAge=d.last_market_refresh?Math.max(0,(Date.now()-new Date(d.last_market_refresh).getTime())/1000):null;
-   window.paperScanLastRefresh=d.last_market_refresh?new Date(d.last_market_refresh).toLocaleString():'not yet';
-   window.paperScanStrategyAt=d.strategy_as_of?new Date(d.strategy_as_of).toLocaleString():'not scored yet';
+   window.paperScanLastRefresh=d.last_market_refresh?new Date(d.last_market_refresh).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+' IST':'not yet';
+   window.paperScanStrategyAt=d.strategy_as_of?new Date(d.strategy_as_of).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+' IST':'not scored yet';
    if(d.market_refresh_error){err.hidden=false;err.textContent='CoinDCX market API partial failure: '+d.market_refresh_error;stateChip(workerOnline?'API WARNING':'WORKER OFFLINE',false);}
    else if(!workerOnline){err.hidden=false;err.textContent='The background-worker heartbeat is missing or stale. Start only queues a cycle; without the worker, markets cannot refresh or candles score. Check the coindcx-strategy-worker service and its shared database.';stateChip('WORKER OFFLINE / STALE',false);}
    else if(!d.last_market_refresh){err.hidden=false;err.textContent='Worker is online but no successful market refresh is recorded. Check worker logs for API, rate-limit, or database errors.';stateChip('WAITING FOR MARKET REFRESH',false);}
