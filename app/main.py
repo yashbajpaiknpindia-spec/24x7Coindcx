@@ -556,11 +556,8 @@ def loss_review_page(request: Request):
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
-        for summ in summaries.values():
-            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
-            summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
-        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,candle_count=candle_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime,fetch_info=fetch_info,fetch_message=runtime.get('loss_review_fetch_message','Historical candle fetch has not been run yet.'))
+        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,candle_count=candle_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime,fetch_info=fetch_info,fetch_message=runtime.get('loss_review_fetch_message','Historical candle fetch has not been run yet.')))
 
 
 @app.get('/scalper', response_class=HTMLResponse)
