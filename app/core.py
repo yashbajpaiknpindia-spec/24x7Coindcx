@@ -1161,6 +1161,14 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
                     row['reason']=f'Reversal: previous 5m interval moved {previous5:+.3f}% against the latest {r5:+.3f}% impulse'
                 elif entry_depth is not None and entry_depth<notional:
                     row['reason']=f'Top-10 entry-side depth {entry_depth:,.0f} USDT is below {notional:,.0f} USDT order size'
+                elif bool(cfg.get('scalper_enforce_stop_cost_guard', True)) and (
+                    hurdle is None or hurdle >= abs(float(cfg.get('scalper_stop_net_pct', 0.40)))
+                ):
+                    row['reason']=(
+                        f'Round-trip cost hurdle {hurdle:.3f}% meets/exceeds the '
+                        f'{abs(float(cfg.get("scalper_stop_net_pct", 0.40))):.3f}% net-stop budget; '
+                        'entry blocked to avoid an already-breached stop'
+                    )
                 elif required is None or estimate<target_net:
                     row['reason']=f'Continuation proxy implies {estimate:+.3f}% net after modeled costs/reserve; target is +{target_net:.3f}%'
                 elif abs(r5)>=0.75 and abs(r5)>max(abs(previous5)*1.8,0.25):
@@ -1321,7 +1329,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
                 'scalper_normal_slippage_pct','scalper_stress_slippage_pct','scalper_fee_gst_pct','spot_fee_pct','futures_fee_pct',
                 'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_cost_case','scalper_spot_tax_pct',
                 'scalper_futures_tax_pct','scalper_tds_pct')}
-            meta={'scalper_version':'0.2.0-dual-paper-tracks-cost-aware','mode':mode,'entry_reason':item['reason'],
+            meta={'scalper_version':'0.3.0-cost-stop-budget-guard','mode':mode,'entry_reason':item['reason'],
                 'return_5m_pct':item.get('return_5m_pct'),'return_previous_5m_pct':item.get('return_previous_5m_pct'),'return_10m_pct':item.get('return_10m_pct'),
                 'expected_continuation_pct':item.get('expected_continuation_pct'),'required_move_pct':item.get('required_move_pct'),'estimated_net_pct':item.get('estimated_net_pct'),
                 'entry_bid':snap.bid,'entry_ask':snap.ask,'expected_move_not_forecast':abs(float(item.get('return_5m_pct') or 0)),
@@ -1365,7 +1373,7 @@ def run_scalper_cycle(db: Session, now=None):
     runtime['scalper_last_cycle']={'at':now.isoformat(),'status':'ok','enabled':bool(base_cfg.get('scalper_enabled',True)),
         'opened':sum(x['opened'] for x in lanes.values()),'closed':sum(x['closed'] for x in lanes.values()),
         'open':len(opened),'closed_count':len(closed),'rolling_profit_factor_after_tax':sum(wins)/abs(sum(losses)) if losses else None,
-        'target_profit_factor':1.25,'version':'0.2.0-dual-paper-tracks-cost-aware'}
+        'target_profit_factor':1.25,'version':'0.3.0-cost-stop-budget-guard'}
     write_config(db,'runtime',runtime); db.flush()
     return {'ok':True,'opened':runtime['scalper_last_cycle']['opened'],'closed':runtime['scalper_last_cycle']['closed'],
         'open':len(opened),'closed_count':len(closed),'profit_factor_after_tax':runtime['scalper_last_cycle']['rolling_profit_factor_after_tax'],
