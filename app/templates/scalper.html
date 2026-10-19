@@ -20,6 +20,7 @@
  <label>Take-profit target after estimated cost/tax (%)<input type="number" name="target_net_pct" min="0.01" max="5" step="0.01" value="{{cfg.get('scalper_target_net_pct',0.15)}}" required></label>
  <label>Loss exit after estimated costs (%)<input type="number" name="stop_net_pct" min="0.05" max="10" step="0.05" value="{{cfg.get('scalper_stop_net_pct',0.4)}}" required></label>
  <label>Maximum holding minutes<input type="number" name="max_hold_minutes" min="1" max="240" step="1" value="{{cfg.get('scalper_max_hold_minutes',15)}}" required></label>
+ <label>Re-entry cooldown per pair (minutes)<input type="number" name="pair_cooldown_minutes" min="0" max="120" step="1" value="{{cfg.get('scalper_pair_cooldown_minutes',5)}}" required></label>
  <label>Minimum reported 24h turnover (USDT)<input type="number" name="min_turnover_usdt" min="0" step="100000" value="{{cfg.get('scalper_min_turnover_usdt',1000000)}}" required></label>
  <label>Maximum spread (basis points)<input type="number" name="max_spread_bps" min="0.1" max="100" step="0.1" value="{{cfg.get('scalper_max_spread_bps',5)}}" required></label>
  <label>Spot tax reserve (%)<input type="number" name="spot_tax_pct" min="0" max="60" step="0.5" value="{{cfg.get('scalper_spot_tax_pct',31.2)}}" required></label>
