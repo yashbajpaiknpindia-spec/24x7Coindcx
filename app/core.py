@@ -1111,6 +1111,8 @@ def run_scalper_cycle(db: Session, now=None):
                 'best_favorable_pct': trade.best_favorable_pct, 'worst_adverse_pct': trade.worst_adverse_pct,
                 'exit_reason': exit_reason, 'closed_at': now.isoformat()}, separators=(',', ':'), default=str)
             closed_count += 1
+    # autoflush is disabled for this app's SQLAlchemy sessions; flush exits before counting free slots.
+    db.flush()
     if cfg.get('scalper_enabled', True):
         current_open = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open')).all()
         live_keys = {(t.product, t.pair) for t in current_open}
@@ -1150,6 +1152,7 @@ def run_scalper_cycle(db: Session, now=None):
                 live_keys.add(key)
                 slots -= 1
                 opened_count += 1
+    db.flush()
     closed = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'closed')).all()
     wins = [float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0) > 0]
     losses = [float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0) < 0]
