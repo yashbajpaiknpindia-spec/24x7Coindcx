@@ -11,7 +11,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + _tmp.name
 os.environ["SECRET_KEY"] = "scalper-test-secret"
 os.environ["ADMIN_PASSWORD"] = "scalper-regression-test-password"
 
-from app.db import Base, engine, SessionLocal, ConfigKV, MarketSnapshot, MarketObservation, ScalpTrade, utcnow
+from app.db import Base, engine, SessionLocal, ConfigKV, MarketSnapshot, MarketObservation, ScalpTrade, ScalpScanSnapshot, utcnow
 from app.core import build_scalper_scan, run_scalper_cycle, _scalp_calculate
 
 Base.metadata.create_all(bind=engine)
@@ -105,6 +105,15 @@ def run():
             assert candidate["bid_depth_10_usdt"] is not None and candidate["ask_depth_10_usdt"] is not None, candidate
             opened = run_scalper_cycle(db, now)
             assert opened["opened"] == 1, opened
+            # New bounded audit snapshots must retain the full candidate list and
+            # scan-time settings, not only a top-25 subset of rejected signals.
+            scan_rows = db.scalars(__import__("sqlalchemy").select(ScalpScanSnapshot)).all()
+            assert len(scan_rows) >= 2, scan_rows
+            for scan_row in scan_rows:
+                saved_candidates = json.loads(scan_row.candidates_json or "[]")
+                assert saved_candidates, scan_row.mode
+                assert all(c.get("_audit_coverage") == "full-universe-v1" for c in saved_candidates), scan_row.mode
+                assert all("_audit_settings" in c for c in saved_candidates), scan_row.mode
             trade = db.scalar(__import__("sqlalchemy").select(ScalpTrade).where(ScalpTrade.status == "open"))
             assert trade is not None
             assert trade.entry_price >= snap.ask - 1e-9, (trade.entry_price, snap.ask)
