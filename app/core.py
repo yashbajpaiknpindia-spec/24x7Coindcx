@@ -1161,6 +1161,14 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
                     row['reason']=f'Reversal: previous 5m interval moved {previous5:+.3f}% against the latest {r5:+.3f}% impulse'
                 elif entry_depth is not None and entry_depth<notional:
                     row['reason']=f'Top-10 entry-side depth {entry_depth:,.0f} USDT is below {notional:,.0f} USDT order size'
+                elif bool(cfg.get('scalper_enforce_stop_cost_guard', True)) and (
+                    hurdle is None or hurdle >= abs(float(cfg.get('scalper_stop_net_pct', 0.40)))
+                ):
+                    row['reason']=(
+                        f'Round-trip cost hurdle {hurdle:.3f}% meets/exceeds the '
+                        f'{abs(float(cfg.get("scalper_stop_net_pct", 0.40))):.3f}% net-stop budget; '
+                        'entry blocked to avoid an already-breached stop'
+                    )
                 elif required is None or estimate<target_net:
                     row['reason']=f'Continuation proxy implies {estimate:+.3f}% net after modeled costs/reserve; target is +{target_net:.3f}%'
                 elif abs(r5)>=0.75 and abs(r5)>max(abs(previous5)*1.8,0.25):
@@ -1198,7 +1206,8 @@ def _scalp_mode(trade):
     return safe_json(trade.metadata_json or '{}').get('mode') or 'research'
 
 
-def _record_scalper_scan(db: Session, now, mode, candidates):
+def _record_scalper_scan(db: Session, now, mode, candidates, cfg=None):
+    cfg = cfg or read_config(db, 'strategy_config', {})
     runtime=read_config(db,'runtime',{})
     key=f'scalper_scan_snapshot_at_{mode}'
     previous=runtime.get(key)
@@ -1208,13 +1217,19 @@ def _record_scalper_scan(db: Session, now, mode, candidates):
             dt=dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
             if (now-dt).total_seconds()<240: return
         except Exception: pass
-    eligible=[x for x in candidates if x.get('eligible')][:15]
-    rejected=[x for x in candidates if not x.get('eligible') and x.get('return_5m_pct') is not None]
-    rejected.sort(key=lambda x:-(abs(float(x.get('return_5m_pct') or 0))/max(float(x.get('required_move_pct') or 0.01),0.01)))
     keys=('product','pair','price','bid','ask','entry_price_estimate','side','return_5m_pct','return_previous_5m_pct','return_10m_pct','expected_continuation_pct','turnover_usdt','spread_bps',
           'bid_depth_10_usdt','ask_depth_10_usdt','entry_depth_10_usdt','cost_hurdle_pct','required_move_pct',
           'estimated_net_pct','edge_multiple','eligible','reason')
-    payload=[{k:x.get(k) for k in keys} for x in eligible+rejected[:25]]
+    # Persist the full bounded universe, not only the 25 most extreme rejected
+    # candidates. Older snapshots are explicitly marked as truncated by absence
+    # of this audit marker; the retention policy below still bounds storage.
+    audit_keys=('scalper_notional_usdt','inr_per_usdt','scalper_target_net_pct','scalper_stop_net_pct',
+        'scalper_spot_fee_pct','scalper_futures_fee_pct','scalper_fee_gst_pct','scalper_normal_slippage_pct',
+        'scalper_stress_slippage_pct','scalper_cost_case','paper_cost_case','scalper_spot_tax_pct',
+        'scalper_futures_tax_pct','scalper_tds_pct')
+    audit_settings={k:cfg[k] for k in audit_keys if k in cfg and cfg[k] is not None}
+    payload=[{**{k:x.get(k) for k in keys},'_audit_coverage':'full-universe-v1',
+              '_universe_count':len(candidates),'_audit_settings':audit_settings} for x in candidates]
     db.add(ScalpScanSnapshot(scanned_at=now,mode=mode,candidates_json=json.dumps(payload,separators=(',',':'),default=str)))
     db.flush()
     old_ids=db.scalars(select(ScalpScanSnapshot.id).where(ScalpScanSnapshot.mode==mode)
@@ -1231,6 +1246,18 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
     cfg['scalper_max_open_positions']=int(cfg.get(f'scalper_{mode}_max_open_positions',cfg.get('scalper_max_open_positions',3)))
     lane_enabled=bool(cfg.get('scalper_enabled',True) and cfg.get(f'scalper_{mode}_enabled',mode=='research'))
     fx=float(cfg.get('inr_per_usdt',94.75))
+    if mode=='capital':
+        capital_limit=(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10.0))/100.0)
+        requested_notional=max(0.0,float(cfg.get('scalper_capital_notional_usdt',30)))
+        effective_notional=min(500.0,requested_notional,capital_limit)
+        # Scan depth against the actual capital-limited ticket size. If the
+        # configured capital cannot support the $10 minimum ticket, keep exits
+        # running but suppress new entries rather than exceeding the allocation.
+        if effective_notional < 10.0:
+            cfg['scalper_notional_usdt']=10.0
+            lane_enabled=False
+        else:
+            cfg['scalper_notional_usdt']=effective_notional
     snapshots={(s.product,s.pair):s for s in db.scalars(select(MarketSnapshot)).all()}
     opened_count=closed_count=0
     open_trades=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open').order_by(ScalpTrade.opened_at.asc())).all()
@@ -1266,7 +1293,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
             closed_count+=1
     db.flush()
     candidates=build_scalper_scan(db,cfg,now)
-    _record_scalper_scan(db,now,mode,candidates)
+    _record_scalper_scan(db,now,mode,candidates,cfg)
     if lane_enabled:
         all_open=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open')).all()
         current_open=[t for t in all_open if _scalp_mode(t)==mode]
@@ -1302,7 +1329,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
                 'scalper_normal_slippage_pct','scalper_stress_slippage_pct','scalper_fee_gst_pct','spot_fee_pct','futures_fee_pct',
                 'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_cost_case','scalper_spot_tax_pct',
                 'scalper_futures_tax_pct','scalper_tds_pct')}
-            meta={'scalper_version':'0.2.0-dual-paper-tracks-cost-aware','mode':mode,'entry_reason':item['reason'],
+            meta={'scalper_version':'0.3.0-cost-stop-budget-guard','mode':mode,'entry_reason':item['reason'],
                 'return_5m_pct':item.get('return_5m_pct'),'return_previous_5m_pct':item.get('return_previous_5m_pct'),'return_10m_pct':item.get('return_10m_pct'),
                 'expected_continuation_pct':item.get('expected_continuation_pct'),'required_move_pct':item.get('required_move_pct'),'estimated_net_pct':item.get('estimated_net_pct'),
                 'entry_bid':snap.bid,'entry_ask':snap.ask,'expected_move_not_forecast':abs(float(item.get('return_5m_pct') or 0)),
@@ -1346,7 +1373,7 @@ def run_scalper_cycle(db: Session, now=None):
     runtime['scalper_last_cycle']={'at':now.isoformat(),'status':'ok','enabled':bool(base_cfg.get('scalper_enabled',True)),
         'opened':sum(x['opened'] for x in lanes.values()),'closed':sum(x['closed'] for x in lanes.values()),
         'open':len(opened),'closed_count':len(closed),'rolling_profit_factor_after_tax':sum(wins)/abs(sum(losses)) if losses else None,
-        'target_profit_factor':1.25,'version':'0.2.0-dual-paper-tracks-cost-aware'}
+        'target_profit_factor':1.25,'version':'0.3.0-cost-stop-budget-guard'}
     write_config(db,'runtime',runtime); db.flush()
     return {'ok':True,'opened':runtime['scalper_last_cycle']['opened'],'closed':runtime['scalper_last_cycle']['closed'],
         'open':len(opened),'closed_count':len(closed),'profit_factor_after_tax':runtime['scalper_last_cycle']['rolling_profit_factor_after_tax'],

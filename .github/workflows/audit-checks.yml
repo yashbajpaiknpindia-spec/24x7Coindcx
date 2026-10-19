@@ -1,0 +1,38 @@
+name: Audit branch checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [audit/scalper-opportunity-ui]
+
+jobs:
+  syntax-and-template-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install application dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check Python syntax
+        run: python -m compileall -q app
+      - name: Parse all Jinja templates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+          env = Environment(loader=FileSystemLoader("app/templates"))
+          # Parse templates without importing the app; register its custom filter.
+          env.filters["ist"] = lambda value, fmt="%d %b %Y %H:%M IST": value
+          paths = sorted(Path("app/templates").glob("*.html"))
+          for path in paths:
+              env.get_template(path.name)
+          print(f"Parsed {len(paths)} Jinja templates")
+          PY
+      - name: Check browser JavaScript syntax
+        run: node --check app/static/app.js

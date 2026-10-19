@@ -76,9 +76,20 @@ scalper_context = {
 }
 scalper_review_context = {
     **base, "page": "scalper_review", "cfg": cfg, "lane_stats": lane_stats,
+    "model_stats": [
+        {"label": "Legacy v0.1 · research", "closed": 0, "wins": 0, "losses": 0,
+         "win_rate": None, "net": 0, "pf": None},
+        {"label": "Model v0.2 · research", "closed": 0, "wins": 0, "losses": 0,
+         "win_rate": None, "net": 0, "pf": None},
+        {"label": "Model v0.2 · capital", "closed": 0, "wins": 0, "losses": 0,
+         "win_rate": None, "net": 0, "pf": None},
+    ],
     "loss_trades": [], "rejected": [],
-    "review_meta": {"snapshots": 0, "candidates": 0, "sampled": 0,
-                    "positive_rejected": 0, "scan_start": None},
+    "review_meta": {"snapshots": 0, "candidates": 0, "episodes": 0, "sampled": 0,
+                    "positive_rejected": 0, "positive_samples": 0,
+                    "full_coverage_snapshots": 0, "legacy_truncated_snapshots": 0,
+                    "relaxed_reversal_episodes": 0, "relaxed_reversal_target_first": 0,
+                    "relaxed_reversal_stop_first": 0, "scan_start": None},
 }
 review_stats = {h: {"evaluated": 0, "held_better": 0, "exit_better": 0, "potential_recovery": 0, "avg_delta": None}
                 for h in ("1h", "4h", "24h", "72h", "7d")}
