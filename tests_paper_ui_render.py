@@ -69,13 +69,15 @@ lane_stats = {
 }
 scalper_context = {
     **base, "page": "scalper", "cfg": cfg, "runtime": {}, "lane_stats": lane_stats,
-    "candidates": [], "trades": [],
+    "candidates": [], "trades": [], "entries_paused": True,
+    "entry_pause_reason": "No strategy passed the 30-day blind acceptance gate.",
     "scalper_stats": {"open": 0, "closed": 0, "wins": 0, "losses": 0,
     "profit_factor": None, "net_after_tax": 0, "open_net": 0, "eligible": 0,
     "scanned": 0, "sample_target": 50, "pf_validated": False},
 }
 scalper_review_context = {
     **base, "page": "scalper_review", "cfg": cfg, "lane_stats": lane_stats,
+    "entries_paused": True, "entry_pause_reason": "No strategy passed the 30-day blind acceptance gate.",
     "model_stats": [
         {"label": "Legacy v0.1 · research", "closed": 0, "wins": 0, "losses": 0,
          "win_rate": None, "net": 0, "pf": None},
@@ -98,6 +100,7 @@ loss_context = {**base, "page": "loss_review", "trades": [],
                 "observation_end": None, "observation_count": 0, "tax_pct": 30, "spot_tax_pct": 31.2, "futures_tax_pct": 31.2,
                 "runtime": {}}
 
+rendered_pages = {}
 for name, context in (
     ("paper.html", paper_context),
     ("ledger.html", ledger_context),
@@ -107,8 +110,13 @@ for name, context in (
 ):
     template = env.get_template(name)
     rendered = template.render(**context)
+    rendered_pages[name] = rendered
     assert "<html" in rendered.lower() and "</html>" in rendered.lower(), name
     print(f"RENDERED {name}: {len(rendered)} bytes")
+
+assert "Shadow-only mode" in rendered_pages["scalper.html"]
+assert "Entry validation pending" in rendered_pages["scalper.html"]
+assert "Shadow-only mode" in rendered_pages["scalper_review.html"]
 
 # This specifically prevents regression to a Python built-in call in a Jinja expression.
 assert env.from_string("{{ (t.quantity * t.entry_price)|abs }}").render(
@@ -116,4 +124,4 @@ assert env.from_string("{{ (t.quantity * t.entry_price)|abs }}").render(
 ) == "10"
 now = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
 assert ist(now, "%H:%M") == "05:30", ist(now, "%H:%M")
-print("PAPER UI RENDER REGRESSION PASSED: paper, ledger, scalper and loss-review templates render; IST and abs filter work.")
+print("PAPER UI RENDER REGRESSION PASSED: all page templates render; shadow-only validation warnings, IST and abs filter work.")
