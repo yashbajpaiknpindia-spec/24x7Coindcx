@@ -61,24 +61,37 @@ ledger_context = {
     "needs_review": 0, "runtime": {}, "paper_trades": [],
     "paper_positions": [], "capital_positions": [],
 }
+lane_stats = {
+    "research": {"open": 0, "closed": 0, "wins": 0, "losses": 0, "net": 0,
+                 "open_net": 0, "pf": None},
+    "capital": {"open": 0, "closed": 0, "wins": 0, "losses": 0, "net": 0,
+                "open_net": 0, "pf": None},
+}
 scalper_context = {
-    **base, "page": "scalper", "cfg": cfg, "runtime": {},
+    **base, "page": "scalper", "cfg": cfg, "runtime": {}, "lane_stats": lane_stats,
     "candidates": [], "trades": [],
     "scalper_stats": {"open": 0, "closed": 0, "wins": 0, "losses": 0,
     "profit_factor": None, "net_after_tax": 0, "open_net": 0, "eligible": 0,
     "scanned": 0, "sample_target": 50, "pf_validated": False},
 }
+scalper_review_context = {
+    **base, "page": "scalper_review", "cfg": cfg, "lane_stats": lane_stats,
+    "loss_trades": [], "rejected": [],
+    "review_meta": {"snapshots": 0, "candidates": 0, "sampled": 0,
+                    "positive_rejected": 0, "scan_start": None},
+}
 review_stats = {h: {"evaluated": 0, "held_better": 0, "exit_better": 0, "potential_recovery": 0, "avg_delta": None}
                 for h in ("1h", "4h", "24h", "72h", "7d")}
 loss_context = {**base, "page": "loss_review", "trades": [],
                 "review_stats": review_stats, "fetch_info": {}, "fetch_message": "Not run", "candle_count": 0, "observation_start": None,
-                "observation_end": None, "observation_count": 0, "tax_pct": 30,
+                "observation_end": None, "observation_count": 0, "tax_pct": 30, "spot_tax_pct": 31.2, "futures_tax_pct": 31.2,
                 "runtime": {}}
 
 for name, context in (
     ("paper.html", paper_context),
     ("ledger.html", ledger_context),
     ("scalper.html", scalper_context),
+    ("scalper_review.html", scalper_review_context),
     ("loss_review.html", loss_context),
 ):
     template = env.get_template(name)
