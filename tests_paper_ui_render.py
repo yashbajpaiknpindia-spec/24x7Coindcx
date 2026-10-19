@@ -69,7 +69,7 @@ scalper_context = {
     "scanned": 0, "sample_target": 50, "pf_validated": False},
 }
 review_stats = {h: {"evaluated": 0, "held_better": 0, "exit_better": 0, "avg_delta": None}
-                for h in ("1h", "4h", "24h")}
+                for h in ("1h", "4h", "24h", "72h", "7d")}
 loss_context = {**base, "page": "loss_review", "trades": [],
                 "review_stats": review_stats, "observation_start": None,
                 "observation_end": None, "observation_count": 0, "tax_pct": 30,
