@@ -9,7 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, LossReviewCandle, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle, build_scalper_scan, run_scalper_cycle, _scalp_calculate,
@@ -193,6 +193,185 @@ def _as_utc(value):
     if value is None:
         return None
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+
+def _candle_time(value):
+    try:
+        ts=float(value)
+        if ts < 10_000_000_000:
+            ts *= 1000
+        return datetime.fromtimestamp(ts/1000, timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _historical_candle_row(raw, product, pair, interval):
+    stamp=_candle_time(raw.get('time',raw.get('t')))
+    if stamp is None:
+        return None
+    def value(*keys):
+        for key in keys:
+            try:
+                if raw.get(key) is not None:
+                    return float(raw[key])
+            except (TypeError,ValueError):
+                pass
+        return None
+    op=value('open','o'); high=value('high','h'); low=value('low','l'); close=value('close','c')
+    if not all(x is not None and math.isfinite(x) and x>0 for x in (op,high,low,close)):
+        return None
+    if high < low or high < max(op,close) or low > min(op,close):
+        return None
+    return {'product':product,'pair':pair,'interval':interval,'candle_time':stamp,
+            'open_price':op,'high_price':high,'low_price':low,'close_price':close,'volume':value('volume','v')}
+
+
+def _save_loss_review_candles(db, client, product, pair, start, end, max_calls=20):
+    interval='15m' if product=='spot' else '5m'
+    seconds=900 if product=='spot' else 300
+    chunk_seconds=seconds*999
+    start_s=int(start.timestamp()); end_s=int(end.timestamp())
+    calls=0; received=0; inserted=0; errors=[]
+    cursor=start_s
+    while cursor < end_s and calls < max_calls:
+        chunk_end=min(end_s,cursor+chunk_seconds)
+        try:
+            if product=='spot':
+                raw_rows=client.spot_candles(pair,interval=interval,limit=1000,
+                    start_time_ms=cursor*1000,end_time_ms=chunk_end*1000)
+            else:
+                raw_rows=client.futures_candles(pair,resolution=5,limit=1000,
+                    start_time_s=cursor,end_time_s=chunk_end)
+            calls += 1
+        except CoinDCXError as exc:
+            errors.append(f'{product} {pair}: {str(exc)[:180]}')
+            break
+        except Exception as exc:
+            calls += 1
+            errors.append(f'{product} {pair}: {type(exc).__name__}: {str(exc)[:120]}')
+            break
+        existing=db.scalars(select(LossReviewCandle).where(
+            LossReviewCandle.product==product,LossReviewCandle.pair==pair,
+            LossReviewCandle.interval==interval,
+            LossReviewCandle.candle_time>=datetime.fromtimestamp(cursor,timezone.utc),
+            LossReviewCandle.candle_time<=datetime.fromtimestamp(chunk_end,timezone.utc)
+        )).all()
+        known={_as_utc(row.candle_time).replace(second=0,microsecond=0) for row in existing}
+        parsed=[]
+        for raw in raw_rows or []:
+            item=_historical_candle_row(raw,product,pair,interval)
+            if not item:
+                continue
+            stamp=item['candle_time']
+            if stamp.timestamp() < cursor-seconds or stamp.timestamp() > chunk_end+seconds:
+                continue
+            received += 1
+            key=stamp.replace(second=0,microsecond=0)
+            if key in known:
+                # Refresh bars that are still forming / provider updates the latest candle.
+                old=next((x for x in existing if _as_utc(x.candle_time).replace(second=0,microsecond=0)==key),None)
+                if old and stamp.timestamp() >= end_s-seconds:
+                    old.open_price=item['open_price']; old.high_price=item['high_price']
+                    old.low_price=item['low_price']; old.close_price=item['close_price']
+                    old.volume=item['volume']; old.fetched_at=now_utc_dt()
+                continue
+            parsed.append(item); known.add(key)
+        for item in parsed:
+            db.add(LossReviewCandle(**item)); inserted += 1
+        cursor=chunk_end+1
+    capped=cursor < end_s and calls >= max_calls
+    return {'calls':calls,'received':received,'inserted':inserted,'errors':errors,'capped':capped,'interval':interval}
+
+
+def now_utc_dt():
+    return datetime.now(timezone.utc)
+
+
+@app.post('/loss-review/refresh')
+def loss_review_refresh(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login', status_code=303)
+    max_trades=8
+    with SessionLocal() as db:
+        runtime=read_config(db,'runtime',{})
+        offset=max(0,int(runtime.get('loss_review_batch_offset',0) or 0))
+        total=db.scalar(select(func.count(Trade.id)).where(
+            Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0)) or 0
+        losses=db.scalars(select(Trade).where(
+            Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0
+        ).order_by(desc(Trade.closed_at)).offset(offset).limit(max_trades)).all()
+        if not losses and offset:
+            offset=0
+            losses=db.scalars(select(Trade).where(
+                Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0
+            ).order_by(desc(Trade.closed_at)).limit(max_trades)).all()
+        runtime['loss_review_fetch_status']='running'
+        runtime['loss_review_fetch_requested_at']=datetime.now(timezone.utc).isoformat()
+        runtime['loss_review_fetch_message']=f'Requesting historical CoinDCX candles for losses {offset+1}–{offset+len(losses)} of {total}.'
+        write_config(db,'runtime',runtime); db.commit()
+        if not losses:
+            runtime['loss_review_fetch_status']='no_losses'
+            runtime['loss_review_fetch_message']='There are no closed losing paper trades to fetch historical data for.'
+            write_config(db,'runtime',runtime); db.commit()
+            return RedirectResponse('/loss-review?fetch=empty',status_code=303)
+
+        # Build the per-market time windows for these trades and merge only overlapping windows.
+        windows={}
+        for t in losses:
+            opened=_as_utc(t.created_at); closed=_as_utc(t.closed_at)
+            if not opened or not closed:
+                continue
+            start=opened-timedelta(hours=1)
+            end=min(datetime.now(timezone.utc),closed+timedelta(days=7,minutes=15))
+            if end<=start:
+                continue
+            key=(t.product,t.pair)
+            windows.setdefault(key,[]).append((start,end))
+        merged=[]
+        for (product,pair),spans in windows.items():
+            spans.sort(key=lambda x:x[0])
+            combined=[]
+            for start,end in spans:
+                if combined and start<=combined[-1][1]+timedelta(minutes=20):
+                    combined[-1]=(combined[-1][0],max(combined[-1][1],end))
+                else:
+                    combined.append((start,end))
+            for start,end in combined:
+                merged.append((product,pair,start,end))
+        client=CoinDCXClient()
+        totals={'calls':0,'received':0,'inserted':0,'errors':[],'capped':False,'markets':0}
+        budget=20
+        for product,pair,start,end in merged:
+            if budget<=0:
+                totals['capped']=True
+                break
+            result=_save_loss_review_candles(db,client,product,pair,start,end,max_calls=budget)
+            totals['calls']+=result['calls']; totals['received']+=result['received']
+            totals['inserted']+=result['inserted']; totals['errors'].extend(result['errors'])
+            totals['capped']=totals['capped'] or result['capped']; totals['markets']+=1
+            budget-=result['calls']
+            if result['errors'] and any('rate limit' in e.lower() for e in result['errors']):
+                break
+        next_offset=offset+len(losses)
+        if next_offset>=total:
+            next_offset=0
+        runtime=read_config(db,'runtime',{})
+        runtime['loss_review_batch_offset']=next_offset
+        runtime['loss_review_fetch_status']='partial' if totals['errors'] or totals['capped'] else 'completed'
+        runtime['loss_review_fetch_completed_at']=datetime.now(timezone.utc).isoformat()
+        runtime['loss_review_fetch_result']={**totals,'batch_offset':offset,'trades_requested':len(losses),'total_losses':total,
+            'next_batch_offset':next_offset,'source':'CoinDCX public historical OHLC REST candles'}
+        runtime['loss_review_fetch_message']=(
+            f"Requested {totals['calls']} market-data API calls for {len(losses)} losses across {totals['markets']} market windows; "
+            f"received {totals['received']} bars and stored {totals['inserted']} new bars."
+            + (' Some windows remain; click Fetch next batch again. ' if totals['capped'] else '')
+            + (f" API warnings: {'; '.join(totals['errors'][:3])}" if totals['errors'] else '')
+        )
+        write_config(db,'runtime',runtime)
+        log_event(db,'Loss review fetched historical candles.', 'INFO' if not totals['errors'] else 'WARNING','loss_review',runtime['loss_review_fetch_result'])
+        db.commit()
+    return RedirectResponse('/loss-review?fetch=done',status_code=303)
 
 
 @app.get('/loss-review', response_class=HTMLResponse)
