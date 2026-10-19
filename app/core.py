@@ -24,7 +24,7 @@ SCALPER_DEFAULTS = {
     'scalper_target_net_pct': 0.15,
     'scalper_stop_net_pct': 0.40,
     'scalper_max_hold_minutes': 15,
-    'scalper_spot_tax_pct': 30,
+    'scalper_spot_tax_pct': 31.2,  # 30% VDA tax plus 4% cess, before any surcharge.
     'scalper_futures_tax_pct': 30,  # Editable planning reserve; actual tax is individual slab for Global Futures.
     'scalper_tds_pct': 1,  # Display-only estimate for spot transfers; not deducted from P&L.
 
@@ -96,6 +96,13 @@ def initialize_defaults(db: Session):
         if setting not in strategy_cfg:
             strategy_cfg[setting]=default_value
             changed=True
+    # One-time migration: the first deployed default reserved 30% but omitted
+    # the 4% cess. Correct only that untouched default, not a value user changed.
+    if strategy_cfg.get('scalper_spot_tax_default_version') is None:
+        if float(strategy_cfg.get('scalper_spot_tax_pct', 31.2) or 0) == 30.0:
+            strategy_cfg['scalper_spot_tax_pct']=31.2
+        strategy_cfg['scalper_spot_tax_default_version']='30pct-plus-cess-v1'
+        changed=True
     if changed:
         write_config(db, 'strategy_config', strategy_cfg)
     seed_backtests(db)
@@ -1059,7 +1066,7 @@ def _scalp_calculate(trade, exit_price, cfg, fx):
     slippage = (entry_notional + exit_notional) * slip_pct * fx
     if trade.product == 'spot':
         # Planning reserve for a VDA transfer; fees/expense deductions are not assumed.
-        tax_rate = max(0.0, float(cfg.get('scalper_spot_tax_pct', cfg.get('scalper_tax_pct', 30))))
+        tax_rate = max(0.0, float(cfg.get('scalper_spot_tax_pct', cfg.get('scalper_tax_pct', 31.2))))
         taxable_basis = max(0.0, gross)
     else:
         # Global futures P&L is treated as other income by CoinDCX; rate depends on
