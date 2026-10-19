@@ -9,7 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, LossReviewCandle, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle, build_scalper_scan, run_scalper_cycle, _scalp_calculate,
@@ -195,6 +195,186 @@ def _as_utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+
+def _candle_time(value):
+    try:
+        ts=float(value)
+        if ts < 10_000_000_000:
+            ts *= 1000
+        return datetime.fromtimestamp(ts/1000, timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _historical_candle_row(raw, product, pair, interval):
+    stamp=_candle_time(raw.get('time',raw.get('t')))
+    if stamp is None:
+        return None
+    def value(*keys):
+        for key in keys:
+            try:
+                if raw.get(key) is not None:
+                    return float(raw[key])
+            except (TypeError,ValueError):
+                pass
+        return None
+    op=value('open','o'); high=value('high','h'); low=value('low','l'); close=value('close','c')
+    if not all(x is not None and math.isfinite(x) and x>0 for x in (op,high,low,close)):
+        return None
+    if high < low or high < max(op,close) or low > min(op,close):
+        return None
+    return {'product':product,'pair':pair,'interval':interval,'candle_time':stamp,
+            'open_price':op,'high_price':high,'low_price':low,'close_price':close,'volume':value('volume','v')}
+
+
+def _save_loss_review_candles(db, client, product, pair, start, end, max_calls=20):
+    interval='15m' if product=='spot' else '5m'
+    seconds=900 if product=='spot' else 300
+    chunk_seconds=seconds*999
+    start_s=int(start.timestamp()); end_s=int(end.timestamp())
+    calls=0; received=0; inserted=0; errors=[]
+    cursor=start_s
+    while cursor < end_s and calls < max_calls:
+        chunk_end=min(end_s,cursor+chunk_seconds)
+        try:
+            if product=='spot':
+                raw_rows=client.spot_candles(pair,interval=interval,limit=1000,
+                    start_time_ms=cursor*1000,end_time_ms=chunk_end*1000)
+            else:
+                raw_rows=client.futures_candles(pair,resolution=5,limit=1000,
+                    start_time_s=cursor,end_time_s=chunk_end)
+            calls += 1
+        except CoinDCXError as exc:
+            calls += 1
+            errors.append(f'{product} {pair}: {str(exc)[:180]}')
+            break
+        except Exception as exc:
+            calls += 1
+            errors.append(f'{product} {pair}: {type(exc).__name__}: {str(exc)[:120]}')
+            break
+        existing=db.scalars(select(LossReviewCandle).where(
+            LossReviewCandle.product==product,LossReviewCandle.pair==pair,
+            LossReviewCandle.interval==interval,
+            LossReviewCandle.candle_time>=datetime.fromtimestamp(cursor,timezone.utc),
+            LossReviewCandle.candle_time<=datetime.fromtimestamp(chunk_end,timezone.utc)
+        )).all()
+        known={_as_utc(row.candle_time).replace(second=0,microsecond=0) for row in existing}
+        parsed=[]
+        for raw in raw_rows or []:
+            item=_historical_candle_row(raw,product,pair,interval)
+            if not item:
+                continue
+            stamp=item['candle_time']
+            if stamp.timestamp() < cursor-seconds or stamp.timestamp() > chunk_end+seconds:
+                continue
+            received += 1
+            key=stamp.replace(second=0,microsecond=0)
+            if key in known:
+                # Refresh bars that are still forming / provider updates the latest candle.
+                old=next((x for x in existing if _as_utc(x.candle_time).replace(second=0,microsecond=0)==key),None)
+                if old and stamp.timestamp() >= end_s-seconds:
+                    old.open_price=item['open_price']; old.high_price=item['high_price']
+                    old.low_price=item['low_price']; old.close_price=item['close_price']
+                    old.volume=item['volume']; old.fetched_at=now_utc_dt()
+                continue
+            parsed.append(item); known.add(key)
+        for item in parsed:
+            db.add(LossReviewCandle(**item)); inserted += 1
+        cursor=chunk_end+1
+    capped=cursor < end_s and calls >= max_calls
+    return {'calls':calls,'received':received,'inserted':inserted,'errors':errors,'capped':capped,'interval':interval}
+
+
+def now_utc_dt():
+    return datetime.now(timezone.utc)
+
+
+@app.post('/loss-review/refresh')
+def loss_review_refresh(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login', status_code=303)
+    max_trades=8
+    with SessionLocal() as db:
+        runtime=read_config(db,'runtime',{})
+        offset=max(0,int(runtime.get('loss_review_batch_offset',0) or 0))
+        total=db.scalar(select(func.count(Trade.id)).where(
+            Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0)) or 0
+        losses=db.scalars(select(Trade).where(
+            Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0
+        ).order_by(desc(Trade.closed_at)).offset(offset).limit(max_trades)).all()
+        if not losses and offset:
+            offset=0
+            losses=db.scalars(select(Trade).where(
+                Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed',Trade.net_pnl_inr<0
+            ).order_by(desc(Trade.closed_at)).limit(max_trades)).all()
+        runtime['loss_review_fetch_status']='running'
+        runtime['loss_review_fetch_requested_at']=datetime.now(timezone.utc).isoformat()
+        runtime['loss_review_fetch_message']=f'Requesting historical CoinDCX candles for losses {offset+1}–{offset+len(losses)} of {total}.'
+        write_config(db,'runtime',runtime); db.commit()
+        if not losses:
+            runtime['loss_review_fetch_status']='no_losses'
+            runtime['loss_review_fetch_message']='There are no closed losing paper trades to fetch historical data for.'
+            write_config(db,'runtime',runtime); db.commit()
+            return RedirectResponse('/loss-review?fetch=empty',status_code=303)
+
+        # Build the per-market time windows for these trades and merge only overlapping windows.
+        windows={}
+        for t in losses:
+            opened=_as_utc(t.created_at); closed=_as_utc(t.closed_at)
+            if not opened or not closed:
+                continue
+            start=opened-timedelta(hours=1)
+            end=min(datetime.now(timezone.utc),closed+timedelta(days=7,minutes=15))
+            if end<=start:
+                continue
+            key=(t.product,t.pair)
+            windows.setdefault(key,[]).append((start,end))
+        merged=[]
+        for (product,pair),spans in windows.items():
+            spans.sort(key=lambda x:x[0])
+            combined=[]
+            for start,end in spans:
+                if combined and start<=combined[-1][1]+timedelta(minutes=20):
+                    combined[-1]=(combined[-1][0],max(combined[-1][1],end))
+                else:
+                    combined.append((start,end))
+            for start,end in combined:
+                merged.append((product,pair,start,end))
+        client=CoinDCXClient()
+        totals={'calls':0,'received':0,'inserted':0,'errors':[],'capped':False,'markets':0}
+        budget=20
+        for product,pair,start,end in merged:
+            if budget<=0:
+                totals['capped']=True
+                break
+            result=_save_loss_review_candles(db,client,product,pair,start,end,max_calls=budget)
+            totals['calls']+=result['calls']; totals['received']+=result['received']
+            totals['inserted']+=result['inserted']; totals['errors'].extend(result['errors'])
+            totals['capped']=totals['capped'] or result['capped']; totals['markets']+=1
+            budget-=result['calls']
+            if result['errors'] and any('rate limit' in e.lower() for e in result['errors']):
+                break
+        next_offset=offset+len(losses)
+        if next_offset>=total:
+            next_offset=0
+        runtime=read_config(db,'runtime',{})
+        runtime['loss_review_batch_offset']=next_offset
+        runtime['loss_review_fetch_status']='partial' if totals['errors'] or totals['capped'] else 'completed'
+        runtime['loss_review_fetch_completed_at']=datetime.now(timezone.utc).isoformat()
+        runtime['loss_review_fetch_result']={**totals,'batch_offset':offset,'trades_requested':len(losses),'total_losses':total,
+            'next_batch_offset':next_offset,'source':'CoinDCX public historical OHLC REST candles'}
+        runtime['loss_review_fetch_message']=(
+            f"Requested {totals['calls']} market-data API calls for {len(losses)} losses across {totals['markets']} market windows; "
+            f"received {totals['received']} bars and stored {totals['inserted']} new bars."
+            + (' Some windows remain; click Fetch next batch again. ' if totals['capped'] else '')
+            + (f" API warnings: {'; '.join(totals['errors'][:3])}" if totals['errors'] else '')
+        )
+        write_config(db,'runtime',runtime)
+        log_event(db,'Loss review fetched historical candles.', 'INFO' if not totals['errors'] else 'WARNING','loss_review',runtime['loss_review_fetch_result'])
+        db.commit()
+    return RedirectResponse('/loss-review?fetch=done',status_code=303)
+
+
 @app.get('/loss-review', response_class=HTMLResponse)
 def loss_review_page(request: Request):
     if not authed(request):
@@ -206,8 +386,10 @@ def loss_review_page(request: Request):
         spot_tax_pct=float(cfg.get('scalper_spot_tax_pct',30)); futures_tax_pct=float(cfg.get('scalper_futures_tax_pct',30))
         fx=float(cfg.get('inr_per_usdt',94.75))
         trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
-        coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
-        first_obs,last_obs,obs_count=coverage
+        coverage=db.execute(select(func.min(LossReviewCandle.candle_time),func.max(LossReviewCandle.candle_time),func.count(LossReviewCandle.id))).one()
+        first_obs,last_obs,candle_count=coverage
+        obs_count=db.scalar(select(func.count(MarketObservation.id))) or 0
+        fetch_info=runtime.get('loss_review_fetch_result',{})
         horizons=(('1h',timedelta(hours=1)),('4h',timedelta(hours=4)),('24h',timedelta(hours=24)),('72h',timedelta(hours=72)),('7d',timedelta(days=7)))
         summaries={h:{'evaluated':0,'held_better':0,'exit_better':0,'potential_recovery':0,'avg_delta':None,'_deltas':[]} for h,_ in horizons}
         rows=[]
@@ -223,29 +405,31 @@ def loss_review_page(request: Request):
             entry_notional=abs(float(t.quantity or 0)*float(t.entry_price or 0))
             fee_pct=float(cfg.get('spot_fee_pct' if t.product=='spot' else 'futures_fee_pct',0.15 if t.product=='spot' else 0.075))/100
             slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
+            candle_rows=[]
             obs_rows=[]
-            if closed and t.entry_price and t.quantity:
-                # Pull the stored path once per trade, then reuse it for all horizons.
-                # The cap/retention policy bounds the requested seven-day window.
-                obs_end=min(closed+timedelta(days=7,minutes=15),now)
+            if closed and opened and t.entry_price and t.quantity:
+                path_end=min(now,closed+timedelta(days=7,minutes=15))
+                candle_rows=db.scalars(select(LossReviewCandle).where(
+                    LossReviewCandle.product==t.product,LossReviewCandle.pair==t.pair,
+                    LossReviewCandle.candle_time>=opened-timedelta(hours=1),
+                    LossReviewCandle.candle_time<=path_end
+                ).order_by(LossReviewCandle.candle_time.asc())).all()
                 obs_rows=db.scalars(select(MarketObservation).where(
                     MarketObservation.product==t.product,MarketObservation.pair==t.pair,
-                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=obs_end
+                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=path_end
                 ).order_by(MarketObservation.observed_at.asc())).all()
 
-            def hypothetical_mark(obs):
-                obs_time=_as_utc(obs.observed_at)
-                executable=(obs.bid if t.side=='buy' else obs.ask)
-                fallback=not bool(executable and executable>0)
-                exit_price=float(executable if not fallback else (obs.last_price or 0))
+            def hypothetical_mark(price, at, source='Historical OHLC candle'):
+                exit_price=float(price or 0)
                 if exit_price<=0:
                     return None
+                at_utc=_as_utc(at)
                 direction=1 if t.side=='buy' else -1
                 gross=(exit_price-float(t.entry_price))*float(t.quantity)*direction*fx
                 exit_notional=abs(float(t.quantity)*exit_price)
                 fees=(entry_notional+exit_notional)*fee_pct*fx
                 slips=(entry_notional+exit_notional)*slip_pct*fx
-                elapsed_hours=max(0,(obs_time-opened).total_seconds()/3600) if opened else 0
+                elapsed_hours=max(0,(at_utc-opened).total_seconds()/3600) if opened else 0
                 funding=0.0
                 if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
                     funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
@@ -254,45 +438,85 @@ def loss_review_page(request: Request):
                 net=gross-fees-slips-funding-tax
                 return {'price':exit_price,'gross_inr':gross,'fees_inr':fees,'slippage_inr':slips,
                         'funding_inr':funding,'tax_inr':tax,'net_after_tax_inr':net,
-                        'at':obs.observed_at,'fallback':fallback}
+                        'at':at,'fallback':source!='Historical OHLC candle','source':source}
 
+            direction=1 if t.side=='buy' else -1
+            pre=[x for x in candle_rows if opened-timedelta(hours=1)<=_as_utc(x.candle_time)<opened and x.open_price and x.close_price]
+            first_hour=[x for x in candle_rows if opened<=_as_utc(x.candle_time)<=min(closed or opened+timedelta(hours=1),opened+timedelta(hours=1)) and x.open_price and x.close_price]
+            if len(pre)>=2:
+                prior_drift=(float(pre[-1].close_price)/float(pre[0].open_price)-1)*100*direction
+                if prior_drift>=0.60 and first_hour:
+                    post_drift=(float(first_hour[-1].close_price)/float(first_hour[0].open_price)-1)*100*direction
+                    if post_drift<=-0.30:
+                        t.entry_timing_diagnosis=f'Possible late/chased entry: price had already moved {prior_drift:+.2f}% in the trade direction during the prior hour, then the first hour after entry moved {post_drift:+.2f}% against the position.'
+                    else:
+                        t.entry_timing_diagnosis=f'Pre-entry price was already extended by {prior_drift:+.2f}% in the trade direction. Late entry is possible but not established by this path alone.'
+                elif prior_drift<=-0.50:
+                    t.entry_timing_diagnosis=f'Potentially weak timing: pre-entry hour moved {prior_drift:+.2f}% against the position direction.'
+                else:
+                    t.entry_timing_diagnosis=f'Pre-entry hour drift was {prior_drift:+.2f}% in the position direction; no clear chase signal from the OHLC bars.'
+            elif any(_as_utc(x.candle_time)<opened for x in candle_rows):
+                t.entry_timing_diagnosis='Some pre-entry candles exist, but fewer than two usable bars; timing remains uncertain.'
+            else:
+                t.entry_timing_diagnosis='Entry timing cannot be confirmed until historical pre-entry candles have been fetched.'
+
+            horizon_rows=[]
             for key,delta in horizons:
                 if not closed:
-                    horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No closed timestamp to anchor this comparison.'})
+                    horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No close timestamp to anchor this comparison.'})
                     continue
                 target=closed+delta
                 reached=target<=now
                 path_end=target if reached else now
                 path_marks=[]
+                # OHLC highs/lows describe possible path extremes, not guaranteed executable fills.
+                for candle in candle_rows:
+                    at=_as_utc(candle.candle_time)
+                    if at<=closed or at>path_end:
+                        continue
+                    fav_price=candle.high_price if t.side=='buy' else candle.low_price
+                    adverse_price=candle.low_price if t.side=='buy' else candle.high_price
+                    best_mark=hypothetical_mark(fav_price,candle.candle_time,'OHLC favorable extreme')
+                    worst_mark=hypothetical_mark(adverse_price,candle.candle_time,'OHLC adverse extreme')
+                    if best_mark: path_marks.append(best_mark)
+                    if worst_mark: path_marks.append(worst_mark)
                 for observation in obs_rows:
-                    if _as_utc(observation.observed_at)>path_end:
-                        break
-                    mark=hypothetical_mark(observation)
-                    if mark:
-                        path_marks.append(mark)
+                    at=_as_utc(observation.observed_at)
+                    if at<=closed or at>path_end:
+                        continue
+                    executable=observation.bid if t.side=='buy' else observation.ask
+                    quote=executable if executable and executable>0 else observation.last_price
+                    mark=hypothetical_mark(quote,observation.observed_at,
+                        'Stored executable quote' if executable and executable>0 else 'Stored last-price fallback')
+                    if mark: path_marks.append(mark)
                 best=max(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
                 worst=min(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
-                # The target endpoint uses the first recorded executable quote in a 15-minute
-                # tolerance after the horizon. For pending horizons, only partial-path extremes
-                # are shown until the full horizon elapses.
                 endpoint=None
+                endpoint_interval=15 if t.product=='spot' else 5
                 if reached:
-                    endpoint_obs=next((o for o in obs_rows if target<=_as_utc(o.observed_at)<=target+timedelta(minutes=15)),None)
-                    if endpoint_obs:
-                        endpoint=hypothetical_mark(endpoint_obs)
+                    endpoint_candle=next((o for o in candle_rows if target<=_as_utc(o.candle_time)<=target+timedelta(minutes=endpoint_interval)),None)
+                    if endpoint_candle:
+                        endpoint=hypothetical_mark(endpoint_candle.close_price,endpoint_candle.candle_time,'Historical OHLC close')
+                    else:
+                        endpoint_obs=next((o for o in obs_rows if target<=_as_utc(o.observed_at)<=target+timedelta(minutes=15)),None)
+                        if endpoint_obs:
+                            quote=endpoint_obs.bid if t.side=='buy' else endpoint_obs.ask
+                            if not quote or quote<=0:
+                                quote=endpoint_obs.last_price
+                            endpoint=hypothetical_mark(quote,endpoint_obs.observed_at,'Stored quote/last-price')
                 if not reached:
-                    note='Horizon is still pending. Partial post-exit observations are shown; best/worst marks are hindsight samples, not guaranteed executable exits.'
+                    note='Horizon pending. Partial OHLC/quote history is shown; a sampled peak is hindsight and may have required enduring a larger interim drawdown.'
                     if best:
-                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
                     horizon_rows.append({'name':key,'status':'Pending','label':'Horizon not reached','note':note,
                         'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
                         'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
                         'best_at':best['at'] if best else None,'worst_at':worst['at'] if worst else None})
                     continue
                 if not endpoint:
-                    note='No stored executable quote within 15 minutes after this horizon. Endpoint comparison is unavailable; best/worst path marks are partial evidence only.'
+                    note='No stored or fetched candle/quote covers this endpoint. Click Fetch historical candles; until then the outcome is not judged.'
                     if best:
-                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                        note+=f" Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
                     horizon_rows.append({'name':key,'status':'Insufficient data','label':'Cannot judge endpoint','note':note,
                         'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
                         'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
@@ -306,13 +530,12 @@ def loss_review_page(request: Request):
                     label='Actual exit beats this endpoint'
                 else:
                     label='Similar net result at endpoint'
-                note=('Used last-price fallback because executable quote was missing. ' if endpoint['fallback'] else '')
-                note+='Endpoint is not a complete trade-path reconstruction.'
+                note=f"Endpoint based on {endpoint['source']}; fees/slippage/tax are modeled, while candle highs/lows are not guaranteed exit fills. "
                 if best:
-                    note+=f" Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}."
+                    note+=f"Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} around {_format_ist(best['at'])}."
                 if worst:
-                    note+=f" Worst sampled post-exit net: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
-                note+=' Peaks/troughs are hindsight marks, not proof the position would have survived or that a live order could fill there.'
+                    note+=f" Worst sampled post-exit net: ₹{worst['net_after_tax_inr']:+,.2f} around {_format_ist(worst['at'])}."
+                note+=' OHLC highs/lows are hindsight extrema, not proof that a position would survive interim drawdown or liquidation.'
                 row={'name':key,'status':'Evaluated','label':label,'gross_inr':endpoint['gross_inr'],
                     'fees_inr':endpoint['fees_inr'],'slippage_inr':endpoint['slippage_inr'],
                     'funding_inr':endpoint['funding_inr'],'tax_inr':endpoint['tax_inr'],
@@ -333,11 +556,8 @@ def loss_review_page(request: Request):
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
-        for summ in summaries.values():
-            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
-            summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
-        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime))
+        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,candle_count=candle_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime,fetch_info=fetch_info,fetch_message=runtime.get('loss_review_fetch_message','Historical candle fetch has not been run yet.')))
 
 
 @app.get('/scalper', response_class=HTMLResponse)
