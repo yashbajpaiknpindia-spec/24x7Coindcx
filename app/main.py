@@ -699,6 +699,26 @@ def scalper_review_page(request: Request):
             side=cand.get('side')
             entry=float(cand.get('entry_price_estimate') or (cand.get('ask') if side=='buy' else cand.get('bid') if cand.get('bid') else cand.get('price')) or cand.get('price'))
             if entry<=0: continue
+            reason=str(cand.get('reason') or '')
+            counterfactual='Not a reversal-gate rejection'
+            counterfactual_pass=False
+            if reason.startswith('Reversal:'):
+                depth=cand.get('entry_depth_10_usdt')
+                estimate=cand.get('estimated_net_pct')
+                r5=float(cand.get('return_5m_pct') or 0)
+                previous5=float(cand.get('return_previous_5m_pct') or 0)
+                late_impulse=abs(r5)>=0.75 and abs(r5)>max(abs(previous5)*1.8,0.25)
+                if depth is None:
+                    counterfactual='Reversal rejection; entry depth unknown'
+                elif float(depth)<mode_notional:
+                    counterfactual='Reversal plus entry-depth gate would still fail'
+                elif estimate is None or float(estimate)<float(cfg.get('scalper_target_net_pct',0.15)):
+                    counterfactual='Reversal plus modeled net-edge gate would still fail'
+                elif late_impulse:
+                    counterfactual='Reversal plus late-impulse gate would still fail'
+                else:
+                    counterfactual='Would pass other modeled gates if reversal veto were removed'
+                    counterfactual_pass=True
             observations=obs_by_pair.get((cand.get('product'),cand.get('pair')),[])
             sampled={}
             for mins in (5,10):
@@ -735,17 +755,22 @@ def scalper_review_page(request: Request):
                 'product':cand.get('product'),'side':side,'r5':cand.get('return_5m_pct'),
                 'r10':cand.get('return_10m_pct'),'spread':cand.get('spread_bps'),
                 'turnover':cand.get('turnover_usdt'),'depth':cand.get('entry_depth_10_usdt'),
-                'reason':cand.get('reason'),'net5':sampled[5]['net'] if sampled[5] else None,
-                'net10':sampled[10]['net'] if sampled[10] else None,
+                'reason':cand.get('reason'),'counterfactual':counterfactual,'counterfactual_pass':counterfactual_pass,
+                'net5':sampled[5]['net'] if sampled[5] else None,'net10':sampled[10]['net'] if sampled[10] else None,
                 'net5_pct':net5_pct,'net10_pct':net10_pct,'outcome':outcome,
                 'at5':sampled[5]['at'] if sampled[5] else None,'at10':sampled[10]['at'] if sampled[10] else None})
         target_first=sum(1 for x in rejected if x['outcome'].startswith('Target threshold first'))
         positive_samples=sum(1 for x in rejected if any(p is not None and p>0 for p in (x['net5_pct'],x['net10_pct'])))
+        relaxed_reversal=[x for x in rejected if x.get('counterfactual_pass')]
+        relaxed_target_first=sum(1 for x in relaxed_reversal if x['outcome'].startswith('Target threshold first'))
+        relaxed_stop_first=sum(1 for x in relaxed_reversal if x['outcome'].startswith('Stop threshold first'))
         rejected.sort(key=lambda x:max(x['net5'] if x['net5'] is not None else -1e18,x['net10'] if x['net10'] is not None else -1e18),reverse=True)
         review_meta={'snapshots':len(scans),'candidates':raw_rejected_count,'episodes':len(rejected),
             'sampled':sum(1 for x in rejected if x['net5'] is not None or x['net10'] is not None),
             'positive_rejected':target_first,'positive_samples':positive_samples,'full_coverage_snapshots':full_coverage_snapshots,
-            'legacy_truncated_snapshots':legacy_truncated_snapshots,'scan_start':scan_cutoff}
+            'legacy_truncated_snapshots':legacy_truncated_snapshots,'relaxed_reversal_episodes':len(relaxed_reversal),
+            'relaxed_reversal_target_first':relaxed_target_first,'relaxed_reversal_stop_first':relaxed_stop_first,
+            'scan_start':scan_cutoff}
     return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
         cfg=cfg,lane_stats=lane_stats,loss_trades=loss_rows,rejected=rejected,review_meta=review_meta))
 
