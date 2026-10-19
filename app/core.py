@@ -33,6 +33,7 @@ SCALPER_DEFAULTS = {
     'scalper_pair_cooldown_minutes': 5,
     'scalper_spot_fee_pct': 0.15,
     'scalper_futures_fee_pct': 0.075,
+    'scalper_fee_gst_pct': 18.0,  # GST on exchange trading fees, subject to the actual account/venue invoice.
     'scalper_normal_slippage_pct': 0.05,
     'scalper_stress_slippage_pct': 0.12,
     'scalper_spot_tax_pct': 31.2,  # 30% VDA tax plus 4% cess, before any surcharge.
@@ -393,6 +394,13 @@ def _scalp_fee_pct(product: str, config: dict):
     return max(0.0, float(config.get(key, config.get(fallback, 0.15 if product == 'spot' else 0.075))))
 
 
+def _scalp_fee_cost_pct(product: str, config: dict):
+    """Trading fee plus 18% GST on the fee; not GST on trade notional."""
+    fee = _scalp_fee_pct(product, config)
+    gst_pct = max(0.0, float(config.get('scalper_fee_gst_pct', 18.0)))
+    return fee * (1.0 + gst_pct / 100.0)
+
+
 def _scalp_slippage_pct(config: dict):
     normal = config.get('scalper_cost_case', config.get('paper_cost_case', 'NORMAL')) != 'STRESS'
     key = 'scalper_normal_slippage_pct' if normal else 'scalper_stress_slippage_pct'
@@ -435,7 +443,7 @@ def _scalp_required_move_pct(product: str, config: dict, snap: MarketSnapshot):
     if spread_bps is None:
         return None
     spread_pct = spread_bps / 100.0
-    fees = 2.0 * _scalp_fee_pct(product, config)
+    fees = 2.0 * _scalp_fee_cost_pct(product, config)
     slips = 2.0 * _scalp_slippage_pct(config)
     target = max(0.0, float(config.get('scalper_target_net_pct', 0.15)))
     tax_key = 'scalper_spot_tax_pct' if product == 'spot' else 'scalper_futures_tax_pct'
@@ -448,7 +456,7 @@ def _scalp_required_move_pct(product: str, config: dict, snap: MarketSnapshot):
 def _scalp_estimated_net_pct(product: str, config: dict, snap: MarketSnapshot, directional_move_pct: float):
     spread = (market_spread_bps(snap.bid, snap.ask) or 0.0) / 100.0
     move = max(0.0, float(directional_move_pct))
-    fees = 2.0 * _scalp_fee_pct(product, config)
+    fees = 2.0 * _scalp_fee_cost_pct(product, config)
     slippage = 2.0 * _scalp_slippage_pct(config)
     tax_key = 'scalper_spot_tax_pct' if product == 'spot' else 'scalper_futures_tax_pct'
     tax = min(0.95, max(0.0, float(config.get(tax_key, 31.2))/100.0))
@@ -473,7 +481,7 @@ def _scalp_cost_hurdle_pct(product: str, config: dict, snap: MarketSnapshot):
     spread_bps = market_spread_bps(snap.bid, snap.ask)
     if spread_bps is None:
         return None
-    return 2.0 * (_scalp_fee_pct(product, config) + _scalp_slippage_pct(config)) + spread_bps / 100.0
+    return 2.0 * (_scalp_fee_cost_pct(product, config) + _scalp_slippage_pct(config)) + spread_bps / 100.0
 
 def normalize_candles(rows):
     out=[]
@@ -1170,7 +1178,7 @@ def _scalp_calculate(trade, exit_price, cfg, fx):
     entry_notional=abs(float(trade.quantity or 0)*float(trade.entry_price or 0))
     exit_notional=abs(float(trade.quantity or 0)*float(exit_price or 0))
     gross=(float(exit_price)-float(trade.entry_price))*float(trade.quantity)*direction*fx
-    fee_pct=_scalp_fee_pct(trade.product,cfg)/100.0
+    fee_pct=_scalp_fee_cost_pct(trade.product,cfg)/100.0
     slip_pct=_scalp_slippage_pct(cfg)/100.0
     fees=(entry_notional+exit_notional)*fee_pct*fx
     slippage=(entry_notional+exit_notional)*slip_pct*fx
@@ -1288,10 +1296,10 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
             side=item['side']; entry_price=float((snap.ask if side=='buy' else snap.bid) or 0)
             if entry_price<=0 or not math.isfinite(entry_price): continue
             quantity=notional/entry_price
-            fee_pct=_scalp_fee_pct(item['product'],cfg)/100.0
+            fee_pct=_scalp_fee_cost_pct(item['product'],cfg)/100.0
             slip_pct=_scalp_slippage_pct(cfg)/100.0
             cost_settings={k:cfg.get(k) for k in ('scalper_spot_fee_pct','scalper_futures_fee_pct',
-                'scalper_normal_slippage_pct','scalper_stress_slippage_pct','spot_fee_pct','futures_fee_pct',
+                'scalper_normal_slippage_pct','scalper_stress_slippage_pct','scalper_fee_gst_pct','spot_fee_pct','futures_fee_pct',
                 'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_cost_case','scalper_spot_tax_pct',
                 'scalper_futures_tax_pct','scalper_tds_pct')}
             meta={'scalper_version':'0.2.0-dual-paper-tracks-cost-aware','mode':mode,'entry_reason':item['reason'],

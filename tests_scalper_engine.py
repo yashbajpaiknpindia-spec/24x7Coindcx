@@ -29,7 +29,7 @@ CFG = {
     "scalper_futures_tax_pct": 31.2,
     "scalper_research_enabled": True,
     "scalper_capital_enabled": False,
-    "scalper_target_net_pct": 0.15,
+    "scalper_target_net_pct": 0.10,
     "scalper_stop_net_pct": 0.40,
     "scalper_max_hold_minutes": 15,
     "scalper_pair_cooldown_minutes": 5,
@@ -39,6 +39,7 @@ CFG = {
     "scalper_capital_max_open_positions": 3,
     "scalper_spot_fee_pct": 0.15,
     "scalper_futures_fee_pct": 0.075,
+    "scalper_fee_gst_pct": 18.0,
     "scalper_normal_slippage_pct": 0.05,
     "scalper_stress_slippage_pct": 0.12,
     "scalper_tds_pct": 1,
@@ -145,7 +146,7 @@ def run():
             })()
             mark = _scalp_calculate(spot, 101.0, CFG, 94.75)
             assert mark["tax"] > 0 and mark["tds"] > 0, mark
-            assert abs(mark["fees"] - (201 * 0.0015 * 94.75)) < 1e-6, mark
+            assert abs(mark["fees"] - (201 * 0.0015 * 1.18 * 94.75)) < 1e-6, mark
             assert abs(mark["slippage"] - (201 * 0.0005 * 94.75)) < 1e-6, mark
             assert mark["net_after_tax"] == mark["gross"] - mark["fees"] - mark["slippage"] - mark["tax"], mark
             futures = type("TradeLike", (), {
@@ -154,7 +155,7 @@ def run():
             })()
             futures_mark = _scalp_calculate(futures, 101.0, CFG, 94.75)
             assert futures_mark["tax"] > 0 and futures_mark["tds"] == 0, futures_mark
-            print("SCALPER REGRESSION PASSED: net-target gate, book depth, dual-track isolation, bid/ask execution, fees/slippage, tax reserve, target exit and no futures TDS.")
+            print("SCALPER REGRESSION PASSED: net-target gate, book depth, dual-track isolation, bid/ask execution, fee GST, fees/slippage, tax reserve, target exit and no futures TDS.")
     finally:
         try:
             Path(_tmp.name).unlink()
