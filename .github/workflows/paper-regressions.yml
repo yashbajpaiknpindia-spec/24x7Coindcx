@@ -22,3 +22,36 @@ jobs:
       - run: python tests_paper_ui_render.py
       - run: python tests_scalper_engine.py
       - run: python tests_loss_review_candles.py
+
+  scalper-blind-month:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install research dependency
+        run: python -m pip install requests==2.32.3
+      - name: Fetch CoinDCX public 1m candles and run blind replay
+        id: replay
+        shell: bash
+        run: |
+          set +e
+          python scripts/scalper_blind_month.py 2>&1 | tee blind_test_output/run.log
+          rc=${PIPESTATUS[0]}
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload research evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coindcx-scalper-blind-month
+          path: blind_test_output/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Publish blind decision
+        if: always()
+        run: |
+          echo "Research script exit code: ${{ steps.replay.outputs.exit_code }}"
+          if [ -f blind_test_output/REPORT.md ]; then cat blind_test_output/REPORT.md; else echo "No report produced; inspect logs/artifact."; fi
