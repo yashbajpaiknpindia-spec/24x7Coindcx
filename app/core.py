@@ -512,6 +512,13 @@ def mark_paper_positions(db: Session):
             adverse_count += 1
         else:
             adverse_count = 0
+        # Persist sampled trade path so closed trades can explain entry quality and giveback.
+        if metadata.get('first_observed_move_pct') is None:
+            metadata['first_observed_move_pct'] = round(adverse_move_pct, 5)
+            metadata['first_observed_at'] = now.isoformat()
+        metadata['best_favorable_move_pct'] = round(max(float(metadata.get('best_favorable_move_pct', 0.0) or 0.0), adverse_move_pct), 5)
+        metadata['worst_adverse_move_pct'] = round(min(float(metadata.get('worst_adverse_move_pct', 0.0) or 0.0), adverse_move_pct), 5)
+        metadata['max_giveback_from_peak_pct'] = round(max(0.0, float(metadata.get('best_favorable_move_pct', 0.0) or 0.0) - adverse_move_pct), 5)
         metadata['consecutive_adverse_observations'] = adverse_count
         metadata['last_adverse_move_pct'] = round(adverse_move_pct, 5)
         metadata['last_risk_check_at'] = now.isoformat()
@@ -558,6 +565,25 @@ def _close_paper_position(db: Session, pos: PaperPosition, price: float, cfg: di
         metadata['held_seconds']=int((trade.closed_at-opened).total_seconds())
         metadata['held_minutes']=round(metadata['held_seconds']/60.0,2)
         metadata['exit_reason']=reason
+        best_fav=float(metadata.get('best_favorable_move_pct', 0.0) or 0.0)
+        first_move=metadata.get('first_observed_move_pct')
+        cost_total=float(trade.fees_inr or 0)+float(trade.slippage_inr or 0)+float(trade.funding_inr or 0)
+        if gross > 0 and trade.net_pnl_inr <= 0:
+            diagnosis='Price moved in the trade direction before costs, but modeled fees/slippage/funding erased the gross gain.'
+        elif best_fav >= 0.40 and trade.net_pnl_inr <= 0:
+            diagnosis=f'Trade showed a sampled favorable excursion of +{best_fav:.2f}% but closed net negative; no profit-lock exit captured that move before the reversal.'
+        elif first_move is not None and float(first_move) <= -0.35 and best_fav < 0.20:
+            diagnosis=f'Entry was adverse from the first sampled check ({float(first_move):.2f}%) and no meaningful favorable move was later observed.'
+        elif 'hard stop' in reason.lower() or 'persistent loss' in reason.lower():
+            diagnosis=f'Protective exit after adverse movement; sampled worst move was {float(metadata.get("worst_adverse_move_pct", 0.0) or 0.0):.2f}%. Stops are evaluated only on fresh worker observations, so gaps can exceed the threshold.'
+        elif ('rebalance' in reason.lower() or 'signal no longer' in reason.lower() or 'direction changed' in reason.lower()) and best_fav >= 0.20:
+            diagnosis=f'Exit followed a rebalance/signal change after a sampled +{best_fav:.2f}% favorable move; review profit giveback (not an intrabar-complete record).'
+        elif trade.net_pnl_inr < 0:
+            diagnosis='Net loss at exit. Older trade path may be incomplete; compare entry signal, exit reason and modeled costs before assigning an entry-versus-exit cause.'
+        else:
+            diagnosis='Closed without a detected cost-erased gain or large sampled giveback.'
+        metadata['cost_total_inr']=round(cost_total, 4)
+        metadata['diagnosis']=diagnosis
         trade.metadata_json=json.dumps(metadata,separators=(',',':'),default=str)
     pos.is_open=False; pos.last_mark_price=price; pos.last_unrealized_pnl_inr=0
 
@@ -782,7 +808,7 @@ def run_paper_cycle(db: Session, force: bool = False):
         trade=Trade(run_mode='paper',product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,leverage=lev,
                     fees_inr=fees,slippage_inr=slips,net_pnl_inr=-(fees+slips),gross_pnl_inr=0,status='open',strategy=STRATEGY_ID,
                     reason='entry: trend-confirmed signal clears estimated round-trip cost hurdle',
-                    metadata_json=json.dumps({'score':item['score'],'momentum_pct':item['momentum_pct'],
+                    metadata_json=json.dumps({'entry_reason':'trend-confirmed signal clears estimated round-trip cost hurdle','best_favorable_move_pct':0.0,'worst_adverse_move_pct':0.0,'score':item['score'],'momentum_pct':item['momentum_pct'],
                         'momentum_24h_pct':item.get('momentum_24h_pct'),'momentum_72h_pct':item.get('momentum_72h_pct'),
                         'expected_move_pct':expected,'estimated_round_trip_cost_pct':hurdle,
                         'required_move_pct':max(float(cfg.get('min_expected_move_pct',0.75)),hurdle*float(cfg.get('cost_coverage_multiple',1.5))),
@@ -844,7 +870,7 @@ def run_paper_cycle(db: Session, force: bool = False):
         trade=Trade(run_mode='paper_capital',product=product,pair=item['pair'],side=side,quantity=qty,entry_price=price,leverage=effective_lev,
             fees_inr=fees,slippage_inr=slips,net_pnl_inr=-(fees+slips),gross_pnl_inr=0,status='open',strategy=STRATEGY_ID,
             reason='capital-constrained entry; margin reserved against configured starting capital',
-            metadata_json=json.dumps({'paper_mode':'capital_constrained','capital_inr':capital_inr,'reserved_margin_inr':required_margin,
+            metadata_json=json.dumps({'entry_reason':'capital-constrained entry; margin reserved against configured starting capital','best_favorable_move_pct':0.0,'worst_adverse_move_pct':0.0,'capital_inr':capital_inr,'reserved_margin_inr':required_margin,
                 'allocation_pct':allocation_pct,'score':item.get('score'),'momentum_24h_pct':item.get('momentum_24h_pct'),
                 'momentum_72h_pct':item.get('momentum_72h_pct'),'expected_move_pct':expected,
                 'estimated_round_trip_cost_pct':hurdle,'entry_bid':snap.bid,'entry_ask':snap.ask}))
