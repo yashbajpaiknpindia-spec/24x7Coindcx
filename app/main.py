@@ -245,6 +245,7 @@ def _save_loss_review_candles(db, client, product, pair, start, end, max_calls=2
                     start_time_s=cursor,end_time_s=chunk_end)
             calls += 1
         except CoinDCXError as exc:
+            calls += 1
             errors.append(f'{product} {pair}: {str(exc)[:180]}')
             break
         except Exception as exc:
