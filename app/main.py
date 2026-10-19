@@ -9,7 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, LossReviewCandle, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, LossReviewCandle, PaperDecisionAudit, Trade, ScalpTrade, ScalpScanSnapshot, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
                    market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle, build_scalper_scan, run_scalper_cycle, _scalp_calculate,
@@ -569,9 +569,10 @@ def scalper_page(request: Request):
         cfg=read_config(db,'strategy_config',{})
         runtime=read_config(db,'runtime',{})
         candidates=build_scalper_scan(db,cfg,now)
-        trades=db.scalars(select(ScalpTrade).order_by(desc(ScalpTrade.opened_at)).limit(100)).all()
-        closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(500)).all()
-        open_trades=[t for t in trades if t.status=='open']
+        trades=db.scalars(select(ScalpTrade).order_by(desc(ScalpTrade.opened_at)).limit(120)).all()
+        closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(1000)).all()
+        all_open=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open')).all()
+        open_trades=[t for t in all_open]
         winners=[float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0)>0]
         losers=[float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0)<0]
         pf=sum(winners)/abs(sum(losers)) if losers else None
@@ -579,16 +580,120 @@ def scalper_page(request: Request):
         net=sum(float(t.net_after_tax_inr or 0) for t in closed)
         stats={'open':len(open_trades),'closed':len(closed),'wins':len(winners),'losses':len(losers),
                'profit_factor':pf,'net_after_tax':net,'open_net':open_marked,
-               'eligible':sum(1 for x in candidates if x['eligible']),
-               'scanned':len(candidates),'sample_target':50,
-               'pf_validated':len(closed)>=50 and pf is not None and pf>=1.25}
+               'eligible':sum(1 for x in candidates if x['eligible']),'scanned':len(candidates),
+               'sample_target':50,'pf_validated':len(closed)>=50 and pf is not None and pf>=1.25}
+        lane_stats={}
+        for mode in ('research','capital'):
+            lane_closed=[t for t in closed if (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
+            lane_open=[t for t in open_trades if (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
+            lane_wins=[float(t.net_after_tax_inr or 0) for t in lane_closed if float(t.net_after_tax_inr or 0)>0]
+            lane_losses=[float(t.net_after_tax_inr or 0) for t in lane_closed if float(t.net_after_tax_inr or 0)<0]
+            lane_stats[mode]={'open':len(lane_open),'closed':len(lane_closed),'wins':len(lane_wins),'losses':len(lane_losses),
+                'net':sum(float(t.net_after_tax_inr or 0) for t in lane_closed),
+                'open_net':sum(float(t.unrealized_net_after_tax_inr or 0) for t in lane_open),
+                'pf':sum(lane_wins)/abs(sum(lane_losses)) if lane_losses else None}
         for t in trades:
-            opened=_as_utc(t.opened_at)
-            ended=_as_utc(t.closed_at) if t.closed_at else now
+            opened=_as_utc(t.opened_at); ended=_as_utc(t.closed_at) if t.closed_at else now
             t.held_minutes=max(0,(ended-opened).total_seconds()/60) if opened else 0
-            t.entry_reason=safe_json(t.metadata_json or '{}').get('entry_reason','—')
-    return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',cfg=cfg,runtime=runtime,
-        candidates=candidates[:100],trades=trades,scalper_stats=stats))
+            t.meta=safe_json(t.metadata_json or '{}')
+            t.mode=t.meta.get('mode') or 'research'
+            t.entry_reason=t.meta.get('entry_reason','—')
+            t.required_move=t.meta.get('required_move_pct')
+            t.return_5m=t.meta.get('return_5m_pct')
+            t.return_10m=t.meta.get('return_10m_pct')
+    return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',
+        cfg=cfg,runtime=runtime,candidates=candidates[:120],trades=trades,scalper_stats=stats,lane_stats=lane_stats))
+
+
+@app.get('/scalper-review', response_class=HTMLResponse)
+def scalper_review_page(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login', status_code=303)
+    now=datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        fx=float(cfg.get('inr_per_usdt',94.75))
+        closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(200)).all()
+        scans=db.scalars(select(ScalpScanSnapshot).order_by(desc(ScalpScanSnapshot.scanned_at)).limit(24)).all()
+        lane_stats={}
+        loss_rows=[]
+        for mode in ('research','capital'):
+            lane=[t for t in closed if (safe_json(t.metadata_json or '{}').get('mode') or 'research')==mode]
+            wins=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)>0]
+            losses=[float(t.net_after_tax_inr or 0) for t in lane if float(t.net_after_tax_inr or 0)<0]
+            lane_stats[mode]={'closed':len(lane),'wins':len(wins),'losses':len(losses),
+                'net':sum(float(t.net_after_tax_inr or 0) for t in lane),
+                'pf':sum(wins)/abs(sum(losses)) if losses else None}
+        for t in closed[:60]:
+            meta=safe_json(t.metadata_json or '{}')
+            t.mode=meta.get('mode') or 'research'
+            t.meta=meta
+            t.held_minutes=float(meta.get('held_minutes') or max(0,((_as_utc(t.closed_at) or now)-(_as_utc(t.opened_at) or now)).total_seconds()/60))
+            favorable=float(t.best_favorable_pct or 0)
+            adverse=abs(float(t.worst_adverse_pct or 0))
+            required=float(meta.get('required_move_pct') or t.cost_hurdle_pct or 0)
+            gross=abs(float(t.gross_pnl_inr or 0))
+            friction=float(t.fees_inr or 0)+float(t.slippage_inr or 0)
+            if friction>gross and float(t.net_after_tax_inr or 0)<0:
+                t.diagnosis='Cost drag dominated this trade: round-trip fees + modeled slippage exceeded its absolute gross P&L.'
+            elif adverse>max(favorable,0.05)*1.25:
+                t.diagnosis='Adverse excursion dominated. Likely entry-timing / continuation failure; compare the saved 5m and 10m moves.'
+            elif required and favorable<required*0.5:
+                t.diagnosis='Little follow-through after entry: sampled favorable move never reached even half the modeled cost-and-target threshold.'
+            elif 'time exit' in (t.exit_reason or '').lower():
+                t.diagnosis='No net-target follow-through inside the holding window.'
+            else:
+                t.diagnosis='Mixed evidence. Compare entry impulse, maximum favorable/adverse excursion and modeled costs; this one trade alone cannot prove the signal bad.'
+            t.cost_pct=100*(friction/max(float(t.notional_usdt or 0)*fx,1)) 
+            t.net_pct=100*float(t.net_after_tax_inr or 0)/max(float(t.notional_usdt or 0)*fx,1)
+        scan_cutoff=min((_as_utc(x.scanned_at) for x in scans),default=now-timedelta(minutes=30))
+        obs_rows=db.scalars(select(MarketObservation).where(MarketObservation.observed_at>=scan_cutoff+timedelta(minutes=2))
+            .order_by(MarketObservation.observed_at.asc()).limit(16000)).all()
+        obs_by_pair={}
+        for obs in obs_rows:
+            obs_by_pair.setdefault((obs.product,obs.pair),[]).append(obs)
+        rejected=[]
+        for snap in scans:
+            at=_as_utc(snap.scanned_at)
+            if not at: continue
+            mode=snap.mode or 'research'
+            try: candidates=json.loads(snap.candidates_json or '[]')
+            except Exception: candidates=[]
+            mode_notional=float(cfg.get('scalper_capital_notional_usdt',30) if mode=='capital' else cfg.get('scalper_research_notional_usdt',100))
+            mode_notional=min(mode_notional,(float(cfg.get('starting_capital_inr',30000))/max(fx,1e-9))*(float(cfg.get('capital_allocation_pct_per_position',10))/100)) if mode=='capital' else mode_notional
+            for cand in candidates:
+                if cand.get('eligible'): continue
+                side=cand.get('side')
+                if side not in ('buy','sell') or not cand.get('price'): continue
+                entry=float(cand.get('entry_price_estimate') or (cand.get('ask') if side=='buy' else cand.get('bid') if cand.get('bid') else cand.get('price')) or cand.get('price'))
+                if entry<=0: continue
+                observations=obs_by_pair.get((cand.get('product'),cand.get('pair')),[])
+                sampled={}
+                for mins in (5,10):
+                    target=at+timedelta(minutes=mins)
+                    pool=[o for o in observations if abs((_as_utc(o.observed_at)-target).total_seconds())<=180 and _as_utc(o.observed_at)>at]
+                    if not pool: sampled[mins]=None; continue
+                    obs=min(pool,key=lambda o:abs((_as_utc(o.observed_at)-target).total_seconds()))
+                    exit_price=(obs.bid if side=='buy' else obs.ask) or obs.last_price
+                    if not exit_price or exit_price<=0: sampled[mins]=None; continue
+                    TradeLike=type('TradeLike',(),{})
+                    fake=TradeLike(); fake.product=cand.get('product'); fake.side=side; fake.entry_price=entry
+                    fake.quantity=mode_notional/entry
+                    mark=_scalp_calculate(fake,float(exit_price),cfg,fx)
+                    sampled[mins]={'net':mark['net_after_tax'],'at':obs.observed_at}
+                rejected.append({'mode':mode,'scanned_at':snap.scanned_at,'pair':cand.get('pair'),
+                    'product':cand.get('product'),'side':side,'r5':cand.get('return_5m_pct'),
+                    'r10':cand.get('return_10m_pct'),'spread':cand.get('spread_bps'),
+                    'turnover':cand.get('turnover_usdt'),'depth':cand.get('entry_depth_10_usdt'),
+                    'reason':cand.get('reason'),'net5':sampled[5]['net'] if sampled[5] else None,
+                    'net10':sampled[10]['net'] if sampled[10] else None,
+                    'at5':sampled[5]['at'] if sampled[5] else None,'at10':sampled[10]['at'] if sampled[10] else None})
+        rejected.sort(key=lambda x:max(x['net5'] if x['net5'] is not None else -1e18,x['net10'] if x['net10'] is not None else -1e18),reverse=True)
+        useful_rejected=[x for x in rejected if ((x['net5'] is not None and x['net5']>0) or (x['net10'] is not None and x['net10']>0))][:50]
+        review_meta={'snapshots':len(scans),'candidates':len(rejected),'sampled':sum(1 for x in rejected if x['net5'] is not None or x['net10'] is not None),
+            'positive_rejected':len(useful_rejected),'scan_start':scan_cutoff}
+    return templates.TemplateResponse('scalper_review.html',context(request,'scalper_review','Scalper signal review',
+        cfg=cfg,lane_stats=lane_stats,loss_trades=closed[:60],rejected=useful_rejected,review_meta=review_meta))
 
 
 @app.post('/scalper/start')
@@ -612,7 +717,7 @@ def scalper_pause(request: Request):
         cfg=read_config(db,'strategy_config',{})
         cfg['scalper_enabled']=False
         write_config(db,'strategy_config',cfg)
-        log_event(db,'Fast scalping paper simulation paused. Existing positions remain monitored and can exit under their risk rules.','WARNING','scalper')
+        log_event(db,'Fast scalper paper simulation paused. Existing positions remain monitored and can exit under their risk rules.','WARNING','scalper')
         db.commit()
     return RedirectResponse('/scalper?paused=1',status_code=303)
 
@@ -621,55 +726,63 @@ def scalper_pause(request: Request):
 def scalper_settings_save(request: Request,
         notional_usdt: float = Form(100),
         max_open_positions: int = Form(3),
+        research_enabled: str = Form('yes'),
+        capital_enabled: str = Form('yes'),
+        capital_notional_usdt: float = Form(30),
+        capital_max_open_positions: int = Form(3),
         target_net_pct: float = Form(0.15),
         stop_net_pct: float = Form(0.40),
         max_hold_minutes: int = Form(15),
         pair_cooldown_minutes: int = Form(5),
-        min_turnover_usdt: float = Form(1000000),
-        max_spread_bps: float = Form(5),
-        spot_tax_pct: float = Form(30),
-        futures_tax_pct: float = Form(30),
+        min_turnover_usdt: float = Form(250000),
+        max_spread_bps: float = Form(8),
+        spot_fee_pct: float = Form(0.15),
+        futures_fee_pct: float = Form(0.075),
+        normal_slippage_pct: float = Form(0.05),
+        stress_slippage_pct: float = Form(0.12),
+        cost_case: str = Form('NORMAL'),
+        min_signal_move_pct: float = Form(0.05),
+        spot_tax_pct: float = Form(31.2),
+        futures_tax_pct: float = Form(31.2),
         tds_pct: float = Form(1)):
     if not authed(request):
-        return RedirectResponse('/login', status_code=303)
-    if not (10 <= notional_usdt <= 500):
-        raise HTTPException(400, 'Scalper notional must be between 10 and 500 USDT.')
-    if not (1 <= max_open_positions <= 10):
-        raise HTTPException(400, 'Open position limit must be between 1 and 10.')
-    if not (0.01 <= target_net_pct <= 5):
-        raise HTTPException(400, 'Net take-profit target must be between 0.01% and 5%.')
-    if not (0.05 <= stop_net_pct <= 10):
-        raise HTTPException(400, 'Net loss limit must be between 0.05% and 10%.')
-    if not (1 <= max_hold_minutes <= 240):
-        raise HTTPException(400, 'Maximum holding time must be between 1 and 240 minutes.')
-    if not (0 <= pair_cooldown_minutes <= 120):
-        raise HTTPException(400, 'Pair cooldown must be between 0 and 120 minutes.')
-    if not (0 <= min_turnover_usdt <= 1000000000000 and 0.1 <= max_spread_bps <= 100):
-        raise HTTPException(400, 'Invalid liquidity or spread threshold.')
-    if not (0 <= spot_tax_pct <= 60 and 0 <= futures_tax_pct <= 60 and 0 <= tds_pct <= 5):
-        raise HTTPException(400, 'Tax assumptions are outside allowed ranges.')
+        return RedirectResponse('/login',status_code=303)
+    if not (10<=notional_usdt<=500 and 10<=capital_notional_usdt<=500):
+        raise HTTPException(400,'Track notional must be between 10 and 500 USDT.')
+    if not (1<=max_open_positions<=10 and 1<=capital_max_open_positions<=10):
+        raise HTTPException(400,'Each track must allow 1 to 10 open positions.')
+    if not (0.01<=target_net_pct<=5 and 0.05<=stop_net_pct<=10):
+        raise HTTPException(400,'Invalid target or loss-stop percentage.')
+    if not (1<=max_hold_minutes<=240 and 0<=pair_cooldown_minutes<=120):
+        raise HTTPException(400,'Invalid maximum hold or re-entry cooldown.')
+    if not (0<=min_turnover_usdt<=1e12 and 0.1<=max_spread_bps<=100 and 0<=min_signal_move_pct<=5):
+        raise HTTPException(400,'Invalid liquidity, spread or soft noise-floor setting.')
+    if not (0<=spot_fee_pct<=2 and 0<=futures_fee_pct<=2 and 0<=normal_slippage_pct<=2 and 0<=stress_slippage_pct<=5):
+        raise HTTPException(400,'Fee/slippage percentages are outside permitted ranges.')
+    if not (0<=spot_tax_pct<=60 and 0<=futures_tax_pct<=60 and 0<=tds_pct<=5 and cost_case in ('NORMAL','STRESS')):
+        raise HTTPException(400,'Tax or cost-case settings are invalid.')
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
-        cfg.update({
-            'scalper_notional_usdt':notional_usdt,
-            'scalper_max_open_positions':max_open_positions,
-            'scalper_target_net_pct':target_net_pct,
-            'scalper_stop_net_pct':stop_net_pct,
-            'scalper_max_hold_minutes':max_hold_minutes,
-            'scalper_pair_cooldown_minutes':pair_cooldown_minutes,
-            'scalper_min_turnover_usdt':min_turnover_usdt,
-            'scalper_max_spread_bps':max_spread_bps,
-            'scalper_spot_tax_pct':spot_tax_pct,
-            'scalper_futures_tax_pct':futures_tax_pct,
-            'scalper_tds_pct':tds_pct,
-            'scalper_spot_tax_default_version':'custom',
-        })
+        cfg.update({'scalper_notional_usdt':notional_usdt,'scalper_max_open_positions':max_open_positions,
+            'scalper_research_notional_usdt':notional_usdt,'scalper_research_max_open_positions':max_open_positions,
+            'scalper_research_enabled':research_enabled.lower()=='yes',
+            'scalper_capital_enabled':capital_enabled.lower()=='yes',
+            'scalper_capital_notional_usdt':capital_notional_usdt,'scalper_capital_max_open_positions':capital_max_open_positions,
+            'scalper_target_net_pct':target_net_pct,'scalper_stop_net_pct':stop_net_pct,
+            'scalper_max_hold_minutes':max_hold_minutes,'scalper_pair_cooldown_minutes':pair_cooldown_minutes,
+            'scalper_min_turnover_usdt':min_turnover_usdt,'scalper_max_spread_bps':max_spread_bps,
+            'scalper_min_signal_move_pct':min_signal_move_pct,
+            'scalper_spot_fee_pct':spot_fee_pct,'scalper_futures_fee_pct':futures_fee_pct,
+            'scalper_normal_slippage_pct':normal_slippage_pct,'scalper_stress_slippage_pct':stress_slippage_pct,
+            'scalper_cost_case':cost_case,'scalper_spot_tax_pct':spot_tax_pct,
+            'scalper_futures_tax_pct':futures_tax_pct,'scalper_tds_pct':tds_pct,
+            'scalper_spot_tax_default_version':'custom','scalper_tax_settings_custom':True,
+            'scalper_logic_version':'net-target-v2'})
         write_config(db,'strategy_config',cfg)
-        log_event(db,'Fast scalper paper settings updated; no live exchange orders were sent.','INFO','scalper',
-                  {'notional_usdt':notional_usdt,'max_open_positions':max_open_positions,
-                   'target_net_pct':target_net_pct,'stop_net_pct':stop_net_pct,
-                   'max_hold_minutes':max_hold_minutes,'pair_cooldown_minutes':pair_cooldown_minutes,'spot_tax_pct':spot_tax_pct,
-                   'futures_tax_pct':futures_tax_pct})
+        log_event(db,'Scalper paper settings updated; separate research and capital tracks retained, no live orders sent.',
+            'INFO','scalper',{'research_enabled':research_enabled,'capital_enabled':capital_enabled,
+            'research_notional':notional_usdt,'capital_notional':capital_notional_usdt,
+            'spot_fee_pct':spot_fee_pct,'futures_fee_pct':futures_fee_pct,'cost_case':cost_case})
         db.commit()
     return RedirectResponse('/scalper?saved=1',status_code=303)
 
