@@ -1198,7 +1198,8 @@ def _scalp_mode(trade):
     return safe_json(trade.metadata_json or '{}').get('mode') or 'research'
 
 
-def _record_scalper_scan(db: Session, now, mode, candidates):
+def _record_scalper_scan(db: Session, now, mode, candidates, cfg=None):
+    cfg = cfg or read_config(db, 'strategy_config', {})
     runtime=read_config(db,'runtime',{})
     key=f'scalper_scan_snapshot_at_{mode}'
     previous=runtime.get(key)
@@ -1214,8 +1215,13 @@ def _record_scalper_scan(db: Session, now, mode, candidates):
     # Persist the full bounded universe, not only the 25 most extreme rejected
     # candidates. Older snapshots are explicitly marked as truncated by absence
     # of this audit marker; the retention policy below still bounds storage.
+    audit_keys=('scalper_notional_usdt','inr_per_usdt','scalper_target_net_pct','scalper_stop_net_pct',
+        'scalper_spot_fee_pct','scalper_futures_fee_pct','scalper_fee_gst_pct','scalper_normal_slippage_pct',
+        'scalper_stress_slippage_pct','scalper_cost_case','paper_cost_case','scalper_spot_tax_pct',
+        'scalper_futures_tax_pct','scalper_tds_pct')
+    audit_settings={k:cfg[k] for k in audit_keys if k in cfg and cfg[k] is not None}
     payload=[{**{k:x.get(k) for k in keys},'_audit_coverage':'full-universe-v1',
-              '_universe_count':len(candidates)} for x in candidates]
+              '_universe_count':len(candidates),'_audit_settings':audit_settings} for x in candidates]
     db.add(ScalpScanSnapshot(scanned_at=now,mode=mode,candidates_json=json.dumps(payload,separators=(',',':'),default=str)))
     db.flush()
     old_ids=db.scalars(select(ScalpScanSnapshot.id).where(ScalpScanSnapshot.mode==mode)
@@ -1267,7 +1273,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
             closed_count+=1
     db.flush()
     candidates=build_scalper_scan(db,cfg,now)
-    _record_scalper_scan(db,now,mode,candidates)
+    _record_scalper_scan(db,now,mode,candidates,cfg)
     if lane_enabled:
         all_open=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open')).all()
         current_open=[t for t in all_open if _scalp_mode(t)==mode]
