@@ -208,11 +208,11 @@ def loss_review_page(request: Request):
         trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
         coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
         first_obs,last_obs,obs_count=coverage
-        summaries={h:{'evaluated':0,'held_better':0,'exit_better':0,'avg_delta':None,'_deltas':[]} for h in ('1h','4h','24h')}
+        horizons=(('1h',timedelta(hours=1)),('4h',timedelta(hours=4)),('24h',timedelta(hours=24)),('72h',timedelta(hours=72)),('7d',timedelta(days=7)))
+        summaries={h:{'evaluated':0,'held_better':0,'exit_better':0,'potential_recovery':0,'avg_delta':None,'_deltas':[]} for h,_ in horizons}
         rows=[]
         for t in trades:
             opened=_as_utc(t.created_at); closed=_as_utc(t.closed_at)
-            metadata=safe_json(t.metadata_json or '{}')
             tax_rate=spot_tax_pct if t.product=='spot' else futures_tax_pct
             taxable_basis=max(0.0,float(t.gross_pnl_inr or 0)) if t.product=='spot' else max(0.0,float(t.gross_pnl_inr or 0)-float(t.fees_inr or 0)-float(t.slippage_inr or 0)-float(t.funding_inr or 0))
             actual_tax=taxable_basis*tax_rate/100
@@ -223,59 +223,116 @@ def loss_review_page(request: Request):
             entry_notional=abs(float(t.quantity or 0)*float(t.entry_price or 0))
             fee_pct=float(cfg.get('spot_fee_pct' if t.product=='spot' else 'futures_fee_pct',0.15 if t.product=='spot' else 0.075))/100
             slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
-            for key,delta in (('1h',timedelta(hours=1)),('4h',timedelta(hours=4)),('24h',timedelta(hours=24))):
+            obs_rows=[]
+            if closed and t.entry_price and t.quantity:
+                # Pull the stored path once per trade, then reuse it for all horizons.
+                # The cap/retention policy bounds the requested seven-day window.
+                obs_end=min(closed+timedelta(days=7,minutes=15),now)
+                obs_rows=db.scalars(select(MarketObservation).where(
+                    MarketObservation.product==t.product,MarketObservation.pair==t.pair,
+                    MarketObservation.observed_at>closed,MarketObservation.observed_at<=obs_end
+                ).order_by(MarketObservation.observed_at.asc())).all()
+
+            def hypothetical_mark(obs):
+                obs_time=_as_utc(obs.observed_at)
+                executable=(obs.bid if t.side=='buy' else obs.ask)
+                fallback=not bool(executable and executable>0)
+                exit_price=float(executable if not fallback else (obs.last_price or 0))
+                if exit_price<=0:
+                    return None
+                direction=1 if t.side=='buy' else -1
+                gross=(exit_price-float(t.entry_price))*float(t.quantity)*direction*fx
+                exit_notional=abs(float(t.quantity)*exit_price)
+                fees=(entry_notional+exit_notional)*fee_pct*fx
+                slips=(entry_notional+exit_notional)*slip_pct*fx
+                elapsed_hours=max(0,(obs_time-opened).total_seconds()/3600) if opened else 0
+                funding=0.0
+                if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
+                    funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
+                tax_base=max(0.0,gross) if t.product=='spot' else max(0.0,gross-fees-slips-funding)
+                tax=tax_base*tax_rate/100
+                net=gross-fees-slips-funding-tax
+                return {'price':exit_price,'gross_inr':gross,'fees_inr':fees,'slippage_inr':slips,
+                        'funding_inr':funding,'tax_inr':tax,'net_after_tax_inr':net,
+                        'at':obs.observed_at,'fallback':fallback}
+
+            for key,delta in horizons:
                 if not closed:
                     horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No closed timestamp to anchor this comparison.'})
                     continue
                 target=closed+delta
-                if target>now:
-                    horizon_rows.append({'name':key,'status':'Pending','label':'Horizon not reached','note':'Wait until the full horizon has elapsed.'})
+                reached=target<=now
+                path_end=target if reached else now
+                path_marks=[]
+                for observation in obs_rows:
+                    if _as_utc(observation.observed_at)>path_end:
+                        break
+                    mark=hypothetical_mark(observation)
+                    if mark:
+                        path_marks.append(mark)
+                best=max(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
+                worst=min(path_marks,key=lambda x:x['net_after_tax_inr']) if path_marks else None
+                # The target endpoint uses the first recorded executable quote in a 15-minute
+                # tolerance after the horizon. For pending horizons, only partial-path extremes
+                # are shown until the full horizon elapses.
+                endpoint=None
+                if reached:
+                    endpoint_obs=next((o for o in obs_rows if target<=_as_utc(o.observed_at)<=target+timedelta(minutes=15)),None)
+                    if endpoint_obs:
+                        endpoint=hypothetical_mark(endpoint_obs)
+                if not reached:
+                    note='Horizon is still pending. Partial post-exit observations are shown; best/worst marks are hindsight samples, not guaranteed executable exits.'
+                    if best:
+                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                    horizon_rows.append({'name':key,'status':'Pending','label':'Horizon not reached','note':note,
+                        'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
+                        'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
+                        'best_at':best['at'] if best else None,'worst_at':worst['at'] if worst else None})
                     continue
-                tolerance=timedelta(minutes=15)
-                obs=db.scalars(select(MarketObservation).where(
-                    MarketObservation.product==t.product,MarketObservation.pair==t.pair,
-                    MarketObservation.observed_at>=target,
-                    MarketObservation.observed_at<=target+tolerance
-                ).order_by(MarketObservation.observed_at.asc()).limit(1)).first()
-                if not obs or not obs.last_price or not t.entry_price or not t.quantity:
-                    horizon_rows.append({'name':key,'status':'Insufficient data','label':'Cannot judge',
-                        'note':'No stored 5-minute market observation close enough to the target time. This is not evidence that the exit was right or wrong.'})
+                if not endpoint:
+                    note='No stored executable quote within 15 minutes after this horizon. Endpoint comparison is unavailable; best/worst path marks are partial evidence only.'
+                    if best:
+                        note+=f" Best sampled net after exit: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}; worst: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                    horizon_rows.append({'name':key,'status':'Insufficient data','label':'Cannot judge endpoint','note':note,
+                        'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
+                        'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
+                        'best_at':best['at'] if best else None,'worst_at':worst['at'] if worst else None})
                     continue
-                # Hypothetical hold: same original entry and quantity, marked at the closest
-                # recorded executable exit quote at the horizon. This cannot recover hidden intrabar highs/lows.
-                fallback=not bool(obs.bid and obs.ask)
-                future_exit=float((obs.bid if t.side=='buy' else obs.ask) if (obs.bid if t.side=='buy' else obs.ask) else obs.last_price)
-                direction=1 if t.side=='buy' else -1
-                gross=(future_exit-float(t.entry_price))*float(t.quantity)*direction*fx
-                exit_notional=abs(float(t.quantity)*future_exit)
-                fees=(entry_notional+exit_notional)*fee_pct*fx
-                slips=(entry_notional+exit_notional)*slip_pct*fx
-                elapsed_hours=max(0,(target-opened).total_seconds()/3600) if opened else delta.total_seconds()/3600
-                funding=0.0
-                if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
-                    funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
-                taxable_basis=max(0.0,gross) if t.product=='spot' else max(0.0,gross-fees-slips-funding)
-                tax=max(0.0,taxable_basis)*tax_rate/100
-                after_tax=gross-fees-slips-funding-tax
-                delta_net=after_tax-actual_after_tax
+                delta_net=endpoint['net_after_tax_inr']-actual_after_tax
                 tolerance_inr=max(5.0,entry_notional*fx*0.001)
                 if delta_net>tolerance_inr:
-                    label='Potentially exited too early'
+                    label='Holding to this endpoint would be better'
                 elif delta_net < -tolerance_inr:
-                    label='Exit better than holding to this point'
+                    label='Actual exit beats this endpoint'
                 else:
-                    label='Similar result at this point'
-                row={'name':key,'status':'Evaluated','label':label,'gross_inr':gross,'fees_inr':fees,
-                    'slippage_inr':slips,'funding_inr':funding,'tax_inr':tax,'net_after_tax_inr':after_tax,
-                    'delta_inr':delta_net,'at':obs.observed_at,'price':future_exit,
-                    'note':('Used last-price fallback because executable bid/ask was missing. ' if fallback else '')+
-                           'Endpoint comparison only; it does not show the path between checks or prove a position would have survived.'}
+                    label='Similar net result at endpoint'
+                note=('Used last-price fallback because executable quote was missing. ' if endpoint['fallback'] else '')
+                note+='Endpoint is not a complete trade-path reconstruction.'
+                if best:
+                    note+=f" Best sampled post-exit net: ₹{best['net_after_tax_inr']:+,.2f} at {_format_ist(best['at'])}."
+                if worst:
+                    note+=f" Worst sampled post-exit net: ₹{worst['net_after_tax_inr']:+,.2f} at {_format_ist(worst['at'])}."
+                note+=' Peaks/troughs are hindsight marks, not proof the position would have survived or that a live order could fill there.'
+                row={'name':key,'status':'Evaluated','label':label,'gross_inr':endpoint['gross_inr'],
+                    'fees_inr':endpoint['fees_inr'],'slippage_inr':endpoint['slippage_inr'],
+                    'funding_inr':endpoint['funding_inr'],'tax_inr':endpoint['tax_inr'],
+                    'net_after_tax_inr':endpoint['net_after_tax_inr'],'delta_inr':delta_net,
+                    'at':endpoint['at'],'price':endpoint['price'],
+                    'best_after_exit_net_inr':best['net_after_tax_inr'] if best else None,
+                    'worst_after_exit_net_inr':worst['net_after_tax_inr'] if worst else None,
+                    'best_at':best['at'] if best else None,'worst_at':worst['at'] if worst else None,
+                    'potential_recovery':bool(best and actual_after_tax<0 and best['net_after_tax_inr']>tolerance_inr),
+                    'note':note}
                 horizon_rows.append(row)
                 summ=summaries[key]; summ['evaluated']+=1; summ['_deltas'].append(delta_net)
                 if delta_net>tolerance_inr: summ['held_better']+=1
                 elif delta_net < -tolerance_inr: summ['exit_better']+=1
+                if row['potential_recovery']: summ['potential_recovery']+=1
             t.review_rows=horizon_rows
             rows.append(t)
+        for summ in summaries.values():
+            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
+            summ.pop('_deltas',None)
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
