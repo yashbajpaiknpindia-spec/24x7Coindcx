@@ -1244,7 +1244,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
     cfg=dict(cfg_override or read_config(db,'strategy_config',{}))
     cfg['scalper_notional_usdt']=float(cfg.get(f'scalper_{mode}_notional_usdt',cfg.get('scalper_notional_usdt',100)))
     cfg['scalper_max_open_positions']=int(cfg.get(f'scalper_{mode}_max_open_positions',cfg.get('scalper_max_open_positions',3)))
-    validation_passed=bool(cfg.get('scalper_strategy_validation_passed',False))
+    validation_passed=cfg.get('scalper_strategy_validation_passed') is True
     lane_enabled=bool(cfg.get('scalper_enabled',True) and cfg.get(f'scalper_{mode}_enabled',mode=='research') and validation_passed)
     fx=float(cfg.get('inr_per_usdt',94.75))
     if mode=='capital':
@@ -1374,7 +1374,7 @@ def run_scalper_cycle(db: Session, now=None):
     wins=[float(t.net_after_tax_inr or 0) for t in closed if float(t.net_after_tax_inr or 0)>0]
     losses=[float(t.net_after_tax_inr or 0) for t in closed if float(t.net_after_tax_inr or 0)<0]
     opened=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='open')).all()
-    validation_passed=bool(base_cfg.get('scalper_strategy_validation_passed',False))
+    validation_passed=base_cfg.get('scalper_strategy_validation_passed') is True
     runtime['scalper_last_cycle']={'at':now.isoformat(),'status':'ok','enabled':bool(base_cfg.get('scalper_enabled',True)),
         'entry_validation_passed':validation_passed,
         'entries_enabled':any(x.get('entries_enabled',False) for x in lanes.values()),
