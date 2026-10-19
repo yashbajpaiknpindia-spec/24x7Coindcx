@@ -27,6 +27,8 @@ jobs:
           from pathlib import Path
           from jinja2 import Environment, FileSystemLoader
           env = Environment(loader=FileSystemLoader("app/templates"))
+          # Parse templates without importing the app; register its custom filter.
+          env.filters["ist"] = lambda value, fmt="%d %b %Y %H:%M IST": value
           paths = sorted(Path("app/templates").glob("*.html"))
           for path in paths:
               env.get_template(path.name)
