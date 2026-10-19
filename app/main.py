@@ -624,6 +624,7 @@ def scalper_settings_save(request: Request,
         target_net_pct: float = Form(0.15),
         stop_net_pct: float = Form(0.40),
         max_hold_minutes: int = Form(15),
+        pair_cooldown_minutes: int = Form(5),
         min_turnover_usdt: float = Form(1000000),
         max_spread_bps: float = Form(5),
         spot_tax_pct: float = Form(30),
@@ -641,6 +642,8 @@ def scalper_settings_save(request: Request,
         raise HTTPException(400, 'Net loss limit must be between 0.05% and 10%.')
     if not (1 <= max_hold_minutes <= 240):
         raise HTTPException(400, 'Maximum holding time must be between 1 and 240 minutes.')
+    if not (0 <= pair_cooldown_minutes <= 120):
+        raise HTTPException(400, 'Pair cooldown must be between 0 and 120 minutes.')
     if not (0 <= min_turnover_usdt <= 1000000000000 and 0.1 <= max_spread_bps <= 100):
         raise HTTPException(400, 'Invalid liquidity or spread threshold.')
     if not (0 <= spot_tax_pct <= 60 and 0 <= futures_tax_pct <= 60 and 0 <= tds_pct <= 5):
@@ -653,6 +656,7 @@ def scalper_settings_save(request: Request,
             'scalper_target_net_pct':target_net_pct,
             'scalper_stop_net_pct':stop_net_pct,
             'scalper_max_hold_minutes':max_hold_minutes,
+            'scalper_pair_cooldown_minutes':pair_cooldown_minutes,
             'scalper_min_turnover_usdt':min_turnover_usdt,
             'scalper_max_spread_bps':max_spread_bps,
             'scalper_spot_tax_pct':spot_tax_pct,
@@ -664,7 +668,7 @@ def scalper_settings_save(request: Request,
         log_event(db,'Fast scalper paper settings updated; no live exchange orders were sent.','INFO','scalper',
                   {'notional_usdt':notional_usdt,'max_open_positions':max_open_positions,
                    'target_net_pct':target_net_pct,'stop_net_pct':stop_net_pct,
-                   'max_hold_minutes':max_hold_minutes,'spot_tax_pct':spot_tax_pct,
+                   'max_hold_minutes':max_hold_minutes,'pair_cooldown_minutes':pair_cooldown_minutes,'spot_tax_pct':spot_tax_pct,
                    'futures_tax_pct':futures_tax_pct})
         db.commit()
     return RedirectResponse('/scalper?saved=1',status_code=303)

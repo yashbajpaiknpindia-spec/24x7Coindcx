@@ -24,6 +24,7 @@ SCALPER_DEFAULTS = {
     'scalper_target_net_pct': 0.15,
     'scalper_stop_net_pct': 0.40,
     'scalper_max_hold_minutes': 15,
+    'scalper_pair_cooldown_minutes': 5,
     'scalper_spot_tax_pct': 31.2,  # 30% VDA tax plus 4% cess, before any surcharge.
     'scalper_futures_tax_pct': 30,  # Editable planning reserve; actual tax is individual slab for Global Futures.
     'scalper_tds_pct': 1,  # Display-only estimate for spot transfers; not deducted from P&L.
@@ -1132,6 +1133,16 @@ def run_scalper_cycle(db: Session, now=None):
     if cfg.get('scalper_enabled', True):
         current_open = db.scalars(select(ScalpTrade).where(ScalpTrade.status == 'open')).all()
         live_keys = {(t.product, t.pair) for t in current_open}
+        # Avoid re-entering the same instrument immediately after a stop/target. Without
+        # this cooldown, a persistent momentum scan can churn the same pair every poll.
+        cooldown_minutes = max(0, min(120, int(cfg.get('scalper_pair_cooldown_minutes', 5))))
+        cooled_keys = set()
+        if cooldown_minutes > 0:
+            recent_closed = db.scalars(select(ScalpTrade).where(
+                ScalpTrade.status == 'closed',
+                ScalpTrade.closed_at >= now - timedelta(minutes=cooldown_minutes)
+            ).order_by(desc(ScalpTrade.closed_at))).all()
+            cooled_keys = {(t.product, t.pair) for t in recent_closed}
         max_open = max(1, min(10, int(cfg.get('scalper_max_open_positions', 3))))
         slots = max(0, max_open - len(current_open))
         if slots:
@@ -1142,7 +1153,7 @@ def run_scalper_cycle(db: Session, now=None):
                 if not item['eligible']:
                     continue
                 key = (item['product'], item['pair'])
-                if key in live_keys:
+                if key in live_keys or key in cooled_keys:
                     continue
                 snap = snapshots.get(key)
                 if not snap:
@@ -1166,6 +1177,7 @@ def run_scalper_cycle(db: Session, now=None):
                         'tick_move_pct': item.get('tick_move_pct'), 'entry_bid': snap.bid, 'entry_ask': snap.ask,
                         'expected_move_not_forecast': abs(float(item.get('return_5m_pct') or 0))}, separators=(',', ':'), default=str)))
                 live_keys.add(key)
+                cooled_keys.add(key)
                 slots -= 1
                 opened_count += 1
     db.flush()
