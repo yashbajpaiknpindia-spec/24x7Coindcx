@@ -90,6 +90,36 @@ class Trade(Base):
     external_order_id: Mapped[str] = mapped_column(String(100), default='')
     metadata_json: Mapped[str] = mapped_column(Text, default='{}')
 
+class ScalpTrade(Base):
+    """Independent fast-scalping paper ledger; never submits exchange orders."""
+    __tablename__ = 'scalp_trades'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    product: Mapped[str] = mapped_column(String(16), index=True)
+    pair: Mapped[str] = mapped_column(String(40), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional_usdt: Mapped[float] = mapped_column(Float, default=100)
+    status: Mapped[str] = mapped_column(String(16), default='open', index=True)
+    gross_pnl_inr: Mapped[float] = mapped_column(Float, default=0)
+    fees_inr: Mapped[float] = mapped_column(Float, default=0)
+    slippage_inr: Mapped[float] = mapped_column(Float, default=0)
+    tax_reserve_inr: Mapped[float] = mapped_column(Float, default=0)
+    tds_estimate_inr: Mapped[float] = mapped_column(Float, default=0)
+    net_after_tax_inr: Mapped[float] = mapped_column(Float, default=0)
+    unrealized_net_after_tax_inr: Mapped[float] = mapped_column(Float, default=0)
+    entry_score: Mapped[float] = mapped_column(Float, default=0)
+    cost_hurdle_pct: Mapped[float] = mapped_column(Float, default=0)
+    spread_bps: Mapped[float] = mapped_column(Float, default=0)
+    best_favorable_pct: Mapped[float] = mapped_column(Float, default=0)
+    worst_adverse_pct: Mapped[float] = mapped_column(Float, default=0)
+    exit_reason: Mapped[str] = mapped_column(String(300), default='')
+    metadata_json: Mapped[str] = mapped_column(Text, default='{}')
+
+
 class OrderRecord(Base):
     __tablename__ = 'order_records'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
