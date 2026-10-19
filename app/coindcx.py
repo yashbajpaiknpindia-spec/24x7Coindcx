@@ -63,10 +63,17 @@ class CoinDCXClient:
         data = self.public_get('/exchange/v1/markets')
         return data if isinstance(data, list) else []
 
-    def spot_candles(self, pair: str, interval: str = '1h', limit: int = 500):
-        # API returns descending time order; normalize to ascending for strategy calculation.
-        data = self.public_get('/market_data/candles', params={'pair': pair, 'interval': interval, 'limit': min(int(limit), 1000)})
-        if not isinstance(data, list): return []
+    def spot_candles(self, pair: str, interval: str = '1h', limit: int = 500,
+                     start_time_ms: int | None = None, end_time_ms: int | None = None):
+        # CoinDCX accepts startTime/endTime in epoch milliseconds and up to 1000 bars.
+        params = {'pair': pair, 'interval': interval, 'limit': max(1, min(int(limit), 1000))}
+        if start_time_ms is not None:
+            params['startTime'] = int(start_time_ms)
+        if end_time_ms is not None:
+            params['endTime'] = int(end_time_ms)
+        data = self.public_get('/market_data/candles', params=params)
+        if not isinstance(data, list):
+            return []
         return sorted(data, key=lambda x: float(x.get('time', 0)))
 
     def spot_orderbook(self, pair: str, depth: int = 50):
@@ -105,11 +112,13 @@ class CoinDCXClient:
     def futures_trades(self, pair: str):
         return self.public_get('/exchange/v1/derivatives/futures/data/trades', params={'pair': pair})
 
-    def futures_candles(self, pair: str, resolution: int = 60, limit: int = 500):
+    def futures_candles(self, pair: str, resolution: int = 60, limit: int = 500,
+                        start_time_s: int | None = None, end_time_s: int | None = None):
         # Public futures candle API uses epoch seconds and resolution in minutes.
         now = int(time.time())
-        start = now - (max(1, min(limit, 1000)) * resolution * 60)
-        data = self.public_get('/market_data/candlesticks', params={'pair': pair, 'from': start, 'to': now, 'resolution': resolution, 'pcode': 'f'}, base=PUBLIC)
+        end = int(end_time_s) if end_time_s is not None else now
+        start = int(start_time_s) if start_time_s is not None else end - (max(1, min(limit, 1000)) * resolution * 60)
+        data = self.public_get('/market_data/candlesticks', params={'pair': pair, 'from': start, 'to': end, 'resolution': resolution, 'pcode': 'f'}, base=PUBLIC)
         # Futures candles use {"s":"ok","data":[...]}; reject explicit error statuses.
         if isinstance(data, dict):
             if str(data.get('s', 'ok')).lower() not in ('ok', 'success', 'true'):

@@ -260,6 +260,23 @@ class MarketObservation(Base):
     __table_args__ = (Index('idx_observation_product_pair_time', 'product', 'pair', 'observed_at'),)
 
 
+class LossReviewCandle(Base):
+    """Requested historical OHLC bars used to re-evaluate exits and entry timing."""
+    __tablename__ = 'loss_review_candles'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product: Mapped[str] = mapped_column(String(16), index=True)
+    pair: Mapped[str] = mapped_column(String(40), index=True)
+    interval: Mapped[str] = mapped_column(String(8), default='15m')
+    candle_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index('idx_loss_review_candle_unique', 'product', 'pair', 'interval', 'candle_time', unique=True),)
+
+
 class PaperDecisionAudit(Base):
     """Accepted/rejected signal decision plus shadow outcome at fixed horizons."""
     __tablename__ = 'paper_decision_audits'
