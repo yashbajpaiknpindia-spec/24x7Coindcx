@@ -388,7 +388,7 @@ def _scalp_fee_pct(product: str, config: dict):
 
 
 def _scalp_slippage_pct(config: dict):
-    normal = config.get('paper_cost_case', 'NORMAL') != 'STRESS'
+    normal = config.get('scalper_cost_case', config.get('paper_cost_case', 'NORMAL')) != 'STRESS'
     key = 'scalper_normal_slippage_pct' if normal else 'scalper_stress_slippage_pct'
     fallback = 'normal_slippage_pct' if normal else 'stress_slippage_pct'
     return max(0.0, float(config.get(key, config.get(fallback, 0.05 if normal else 0.12))))
@@ -454,6 +454,16 @@ def _scalp_estimated_net_pct(product: str, config: dict, snap: MarketSnapshot, d
 
 
 def _entry_cost_hurdle_pct(product: str, config: dict, snap: MarketSnapshot):
+    # Shared paper-strategy cost hurdle remains tied to its own paper settings.
+    fee = float(config.get('spot_fee_pct' if product == 'spot' else 'futures_fee_pct', 0.15 if product == 'spot' else 0.075))
+    slip = float(config.get('normal_slippage_pct', 0.05)) if config.get('paper_cost_case', 'NORMAL') == 'NORMAL' else float(config.get('stress_slippage_pct', 0.12))
+    spread_bps = market_spread_bps(snap.bid, snap.ask)
+    if spread_bps is None:
+        return None
+    return 2.0 * (fee + slip) + spread_bps / 100.0
+
+
+def _scalp_cost_hurdle_pct(product: str, config: dict, snap: MarketSnapshot):
     spread_bps = market_spread_bps(snap.bid, snap.ask)
     if spread_bps is None:
         return None
@@ -1108,7 +1118,7 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
                 r5=(float(newest.last_price)/float(prior.last_price)-1)*100
                 r10=(float(newest.last_price)/float(older.last_price)-1)*100
                 side='buy' if r5>0 else 'sell'
-                hurdle=_entry_cost_hurdle_pct(snap.product,cfg,snap)
+                hurdle=_scalp_cost_hurdle_pct(snap.product,cfg,snap)
                 required=_scalp_required_move_pct(snap.product,cfg,snap)
                 edge=abs(r5)/hurdle if hurdle and hurdle>0 else None
                 entry_depth=row['bid_depth_10_usdt'] if side=='sell' else row['ask_depth_10_usdt']
@@ -1261,7 +1271,7 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
             slip_pct=_scalp_slippage_pct(cfg)/100.0
             cost_settings={k:cfg.get(k) for k in ('scalper_spot_fee_pct','scalper_futures_fee_pct',
                 'scalper_normal_slippage_pct','scalper_stress_slippage_pct','spot_fee_pct','futures_fee_pct',
-                'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_spot_tax_pct',
+                'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_cost_case','scalper_spot_tax_pct',
                 'scalper_futures_tax_pct','scalper_tds_pct')}
             meta={'scalper_version':'0.2.0-dual-paper-tracks-cost-aware','mode':mode,'entry_reason':item['reason'],
                 'return_5m_pct':item.get('return_5m_pct'),'return_10m_pct':item.get('return_10m_pct'),
