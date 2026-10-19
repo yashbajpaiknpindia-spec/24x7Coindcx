@@ -4,8 +4,24 @@
  <div class="stat-card"><div class="stat-top"><span>Unlimited research mode</span></div><div class="stat-value">{{'ACTIVE' if cfg.paper_enabled else 'PAUSED'}}</div><div class="stat-foot">Fixed {{cfg.get('research_notional_usdt',1000)}} USDT notional per entry; no starting-capital cap</div></div>
  <div class="stat-card"><div class="stat-top"><span>Research open positions</span></div><div class="stat-value">{{positions|length}}</div><div class="stat-foot">{{trades|length}} research trade records loaded</div></div>
  <div class="stat-card"><div class="stat-top"><span>Capital-mode open positions</span></div><div class="stat-value">{{capital_positions|length}}</div><div class="stat-foot">{{capital_trades|length}} constrained trade records loaded</div></div>
- <div class="stat-card"><div class="stat-top"><span>Last cycle eligible entries</span></div><div class="stat-value">{{runtime.get('last_strategy_cycle',{}).get('eligible_signals',0)}}</div><div class="stat-foot">Selected signals: {{runtime.get('last_strategy_cycle',{}).get('selected_signals',0)}} · research does not force bad trades</div></div>
+ <div class="stat-card"><div class="stat-top"><span>Last rebalance eligible entries</span></div><div class="stat-value">{{runtime.get('last_strategy_cycle',{}).get('eligible_signals',0)}}</div><div class="stat-foot">Last cycle {{runtime.get('last_strategy_cycle',{}).get('at')|ist if runtime.get('last_strategy_cycle',{}).get('at') else 'not run'}} · latest score scan shown below</div></div>
 </section>
+{% set current_scan=runtime.get('paper_strategy_scan',{}) %}
+{% set current_products=current_scan.get('products',{}) %}
+{% set current_rows=current_products.get('spot',[])+current_products.get('futures',[]) %}
+{% set live_counts=namespace(actionable=0,watch=0,trend_disagree=0,rank_not_selected=0,stable_excluded=0,outside_shortlist=0) %}
+{% for signal_row in current_rows %}
+ {% if signal_row.get('signal') in ['BUY','SELL','LONG','SHORT','ENTER_LONG','ENTER_SHORT'] %}{% set live_counts.actionable=live_counts.actionable+1 %}
+ {% elif signal_row.get('signal')=='WATCH' %}{% set live_counts.watch=live_counts.watch+1 %}
+ {% elif signal_row.get('signal')=='EXCLUDED' %}{% set live_counts.stable_excluded=live_counts.stable_excluded+1 %}
+ {% else %}{% set live_counts.outside_shortlist=live_counts.outside_shortlist+1 %}{% endif %}
+ {% set why=(signal_row.get('signal_reason','')|lower) %}
+ {% if 'trend windows do not agree' in why %}{% set live_counts.trend_disagree=live_counts.trend_disagree+1 %}
+ {% elif 'not selected by signal rank' in why %}{% set live_counts.rank_not_selected=live_counts.rank_not_selected+1 %}{% endif %}
+{% endfor %}
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">LATEST STRATEGY SCORE SCAN</div><h3>Current signals, separate from the last daily rebalance</h3><p class="muted">Latest candle score timestamp: {{current_scan.get('as_of')|ist('%d %b %Y %H:%M') if current_scan.get('as_of') else 'not available'}} · {{current_rows|length}} product/pair records</p></div><span class="status-chip {{'green' if live_counts.actionable else 'muted-chip'}}">{{live_counts.actionable}} ACTIONABLE</span></div>
+<div class="stat-grid four"><div class="stat-card"><div class="stat-top"><span>Actionable entries now</span></div><div class="stat-value">{{live_counts.actionable}}</div><div class="stat-foot">Current BUY/SELL-style signals from the latest score scan</div></div><div class="stat-card"><div class="stat-top"><span>Watch / not yet confirmed</span></div><div class="stat-value">{{live_counts.watch}}</div><div class="stat-foot">{{live_counts.trend_disagree}} fail 14D/24H/72H agreement · {{live_counts.rank_not_selected}} did not make rank cut</div></div><div class="stat-card"><div class="stat-top"><span>Excluded markets</span></div><div class="stat-value">{{live_counts.stable_excluded}}</div><div class="stat-foot">Stablecoin base assets excluded from momentum</div></div><div class="stat-card"><div class="stat-top"><span>Outside shortlist</span></div><div class="stat-value">{{live_counts.outside_shortlist}}</div><div class="stat-foot">Scanned but not a top-ranked candidate</div></div></div>
+<div class="panel-note">This scored-signal scan refreshes about every 15 minutes. Portfolio rebalancing runs daily unless you press “Run cycle now”. A zero actionable count here means the latest stored scores do not currently qualify; it does not mean the market feed is down.</div></section>
 {% if runtime.get('last_strategy_cycle',{}).get('status')=='ok' and (runtime.get('last_strategy_cycle',{}).get('selected_signals',0)|int)==0 %}
 <div class="notice notice-amber"><b>Research mode is active, but no signal qualified on the last cycle.</b> This is not a capital-limit rejection: current 14D/24H/72H trend selection produced zero entries. The engine deliberately will not open a trade just to fill the ledger. Check the live scan table and decision audit for the gate details.</div>
 {% endif %}

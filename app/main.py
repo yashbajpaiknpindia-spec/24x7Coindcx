@@ -203,7 +203,7 @@ def loss_review_page(request: Request):
     with SessionLocal() as db:
         cfg=read_config(db,'strategy_config',{})
         runtime=read_config(db,'runtime',{})
-        spot_tax_pct=float(cfg.get('scalper_spot_tax_pct',30)); futures_tax_pct=float(cfg.get('scalper_futures_tax_pct',30))
+        spot_tax_pct=float(cfg.get('scalper_spot_tax_pct',31.2)); futures_tax_pct=float(cfg.get('scalper_futures_tax_pct',30))
         fx=float(cfg.get('inr_per_usdt',94.75))
         trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
         coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
@@ -333,9 +333,6 @@ def loss_review_page(request: Request):
         for summ in summaries.values():
             summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
             summ.pop('_deltas',None)
-        for summ in summaries.values():
-            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
-            summ.pop('_deltas',None)
     return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
         observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,spot_tax_pct=spot_tax_pct,futures_tax_pct=futures_tax_pct,runtime=runtime))
 
@@ -438,6 +435,7 @@ def scalper_settings_save(request: Request,
             'scalper_spot_tax_pct':spot_tax_pct,
             'scalper_futures_tax_pct':futures_tax_pct,
             'scalper_tds_pct':tds_pct,
+            'scalper_spot_tax_default_version':'custom',
         })
         write_config(db,'strategy_config',cfg)
         log_event(db,'Fast scalper paper settings updated; no live exchange orders were sent.','INFO','scalper',
