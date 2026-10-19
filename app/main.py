@@ -601,6 +601,7 @@ def scalper_page(request: Request):
             t.required_move=t.meta.get('required_move_pct')
             t.return_5m=t.meta.get('return_5m_pct')
             t.return_10m=t.meta.get('return_10m_pct')
+            t.return_previous_5m=t.meta.get('return_previous_5m_pct')
     return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',
         cfg=cfg,runtime=runtime,candidates=candidates[:120],trades=trades,scalper_stats=stats,lane_stats=lane_stats))
 
