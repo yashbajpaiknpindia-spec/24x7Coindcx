@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from jinja2 import Environment, FileSystemLoader
 
 ROOT = Path(__file__).resolve().parent
-env = Environment(loader=FileSystemLoader(str(ROOT / "app" / "templates"), autoescape=True))
+env = Environment(loader=FileSystemLoader(str(ROOT / "app" / "templates")), autoescape=True)
 
 def ist(value, fmt="%d %b %Y %H:%M IST"):
     if value is None:
