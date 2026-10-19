@@ -22,8 +22,8 @@
  <label>Maximum holding minutes<input type="number" name="max_hold_minutes" min="1" max="240" step="1" value="{{cfg.get('scalper_max_hold_minutes',15)}}" required></label>
  <label>Minimum reported 24h turnover (USDT)<input type="number" name="min_turnover_usdt" min="0" step="100000" value="{{cfg.get('scalper_min_turnover_usdt',1000000)}}" required></label>
  <label>Maximum spread (basis points)<input type="number" name="max_spread_bps" min="0.1" max="100" step="0.1" value="{{cfg.get('scalper_max_spread_bps',5)}}" required></label>
- <label>Spot tax reserve (%)<input type="number" name="spot_tax_pct" min="0" max="60" step="0.5" value="{{cfg.get('scalper_spot_tax_pct',30)}}" required></label>
- <label>Futures income-tax assumption (%)<input type="number" name="futures_tax_pct" min="0" max="60" step="0.5" value="{{cfg.get('scalper_futures_tax_pct',30)}}" required></label>
+ <label>Spot tax reserve % (30% + 4% cess; surcharge extra)<input type="number" name="spot_tax_pct" min="0" max="60" step="0.1" value="{{cfg.get('scalper_spot_tax_pct',31.2)}}" required></label>
+ <label>Futures tax reserve % (editable planning assumption)<input type="number" name="futures_tax_pct" min="0" max="60" step="0.1" value="{{cfg.get('scalper_futures_tax_pct',31.2)}}" required></label>
  <label>Spot TDS display estimate (%)<input type="number" name="tds_pct" min="0" max="5" step="0.1" value="{{cfg.get('scalper_tds_pct',1)}}" required></label>
  <div class="button-row"><button class="btn btn-primary" type="submit">Save paper settings</button></div>
 </form></section>
@@ -38,7 +38,7 @@
 {% if not trades %}<tr><td colspan="13" class="empty">No scalper paper trades yet. It enters only when recent market observations agree and the modeled move clears costs; zero signals is preferable to fabricating trades.</td></tr>{% endif %}
 </tbody></table></div></section>
 <section class="panel"><div class="panel-head"><div><div class="eyebrow">COST & TAX POLICY</div><h3>What “net after tax” means in this simulation</h3></div></div>
-<p>Entry and exit are priced at the current executable side of the book; modeled taker fees and slippage are charged on both sides. Spot uses the editable {{cfg.get("scalper_spot_tax_pct",30)}}% reserve on positive gross transfer gains as a planning approximation. Futures uses the editable {{cfg.get("scalper_futures_tax_pct",30)}}% assumption on positive modeled gains after costs; CoinDCX says Global Futures income is taxed according to an individual’s tax slab, so adjust this assumption for your situation. The spot TDS field is an illustrative withholding estimate only and is not deducted again from P&amp;L; actual applicability depends on transaction type and thresholds. This is not a tax return or legal advice.</p>
+<p>Entry and exit are priced at the current executable side of the book; modeled taker fees and slippage are charged on both sides. Spot uses the editable {{cfg.get("scalper_spot_tax_pct",31.2)}}% reserve (default 30% base tax + 4% cess; any income-dependent surcharge is excluded) on positive gross transfer gains as a planning approximation. Futures uses the editable {{cfg.get("scalper_futures_tax_pct",30)}}% assumption on positive modeled gains after costs; CoinDCX says Global Futures income is taxed according to an individual’s tax slab, so adjust this assumption for your situation. The spot TDS field is an illustrative withholding estimate only and is not deducted again from P&amp;L; actual applicability depends on transaction type and thresholds. This is not a tax return or legal advice.</p>
 <p class="muted">This mode defaults to one-times simulated exposure, at most three positions and a 15-minute time exit. It is research—not a claim that >1.25 profit factor is achievable. Live orders remain disabled.</p>
 </section>
 {% endblock %}
