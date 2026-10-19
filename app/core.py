@@ -24,8 +24,10 @@ SCALPER_DEFAULTS = {
     'scalper_target_net_pct': 0.15,
     'scalper_stop_net_pct': 0.40,
     'scalper_max_hold_minutes': 15,
-    'scalper_tax_pct': 30,
-    'scalper_tds_pct': 1,
+    'scalper_spot_tax_pct': 30,
+    'scalper_futures_tax_pct': 30,  # Editable planning reserve; actual tax is individual slab for Global Futures.
+    'scalper_tds_pct': 1,  # Display-only estimate for spot transfers; not deducted from P&L.
+
 }
 # Pegged stablecoins have a near-zero volatility denominator in momentum/volatility
 # ranks, which can manufacture large scores from tiny price noise. Keep them visible
@@ -1055,11 +1057,18 @@ def _scalp_calculate(trade, exit_price, cfg, fx):
     slip_pct = float(cfg.get('normal_slippage_pct', 0.05)) / 100 if cfg.get('paper_cost_case', 'NORMAL') == 'NORMAL' else float(cfg.get('stress_slippage_pct', 0.12)) / 100
     fees = (entry_notional + exit_notional) * fee_pct * fx
     slippage = (entry_notional + exit_notional) * slip_pct * fx
-    # Illustrative conservative reserve: 30% on positive gross VDA transfer gain.
-    # It is not legal tax advice; futures/derivative treatment may differ.
-    tax = max(0.0, gross) * max(0.0, float(cfg.get('scalper_tax_pct', 30))) / 100
+    if trade.product == 'spot':
+        # Planning reserve for a VDA transfer; fees/expense deductions are not assumed.
+        tax_rate = max(0.0, float(cfg.get('scalper_spot_tax_pct', cfg.get('scalper_tax_pct', 30))))
+        taxable_basis = max(0.0, gross)
+    else:
+        # Global futures P&L is treated as other income by CoinDCX; rate depends on
+        # the individual's slab. This is only a configurable planning assumption.
+        tax_rate = max(0.0, float(cfg.get('scalper_futures_tax_pct', 30)))
+        taxable_basis = max(0.0, gross - fees - slippage)
+    tax = taxable_basis * tax_rate / 100
     net = gross - fees - slippage - tax
-    # 1% spot-transfer TDS is shown as a possible cash withholding, not a trading loss.
+    # Display-only possible spot TDS estimate, not subtracted again from profit.
     tds = exit_notional * fx * max(0.0, float(cfg.get('scalper_tds_pct', 1))) / 100 if trade.product == 'spot' else 0.0
     return {'gross': gross, 'fees': fees, 'slippage': slippage, 'tax': tax,
             'net_after_tax': net, 'tds': tds, 'exit_notional': exit_notional}
