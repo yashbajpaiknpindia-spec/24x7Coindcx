@@ -114,15 +114,21 @@ def initialize_defaults(db: Session):
             strategy_cfg['scalper_spot_tax_pct']=31.2
         strategy_cfg['scalper_spot_tax_default_version']='30pct-plus-cess-v1'
         changed=True
-    # One-time shift from the hard 0.25% move gate to net-target-aware screening.
-    if strategy_cfg.get('scalper_logic_version') != 'net-target-v2':
+    # One-time upgrades migrate only untouched prior defaults, never user-customized values.
+    if strategy_cfg.get('scalper_logic_version') != 'persistence-v3':
         if float(strategy_cfg.get('scalper_min_signal_move_pct', 0.25) or 0) == 0.25:
             strategy_cfg['scalper_min_signal_move_pct'] = 0.05
+            changed = True
+        if float(strategy_cfg.get('scalper_min_turnover_usdt', 250000) or 0) == 1_000_000.0:
+            strategy_cfg['scalper_min_turnover_usdt'] = 250_000.0
+            changed = True
+        if float(strategy_cfg.get('scalper_max_spread_bps', 8) or 0) == 5.0:
+            strategy_cfg['scalper_max_spread_bps'] = 8.0
             changed = True
         if strategy_cfg.get('scalper_spot_tax_default_version') != 'custom' and float(strategy_cfg.get('scalper_futures_tax_pct', 30) or 0) == 30.0:
             strategy_cfg['scalper_futures_tax_pct'] = 31.2
             changed = True
-        strategy_cfg['scalper_logic_version'] = 'net-target-v2'
+        strategy_cfg['scalper_logic_version'] = 'persistence-v3'
         changed = True
     if changed:
         write_config(db, 'strategy_config', strategy_cfg)
@@ -1090,8 +1096,8 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
         spread_bps = _scalp_spread_bps(snap)
         row = {'product':snap.product,'pair':snap.pair,'price':snap.last_price,
             'turnover_usdt':snap.quote_turnover_usdt,'spread_bps':spread_bps,'bid':snap.bid,'ask':snap.ask,'entry_price_estimate':None,
-            'side':'—','return_5m_pct':None,'return_10m_pct':None,'cost_hurdle_pct':None,
-            'required_move_pct':None,'estimated_net_pct':None,'edge_multiple':None,
+            'side':'—','return_5m_pct':None,'return_previous_5m_pct':None,'return_10m_pct':None,'cost_hurdle_pct':None,
+            'required_move_pct':None,'expected_continuation_pct':None,'estimated_net_pct':None,'edge_multiple':None,
             'bid_depth_10_usdt':_scalp_orderbook_depth(snap,'buy',10),
             'ask_depth_10_usdt':_scalp_orderbook_depth(snap,'sell',10),'entry_depth_10_usdt':None,
             'eligible':False,'reason':'No valid setup yet','move_is_observed_not_forecast':True}
@@ -1116,29 +1122,44 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
                 row['reason']='Recent price history has a gap; wait for fresh samples'
             else:
                 r5=(float(newest.last_price)/float(prior.last_price)-1)*100
+                # "previous 5m" is the interval prior to the newest sample. The
+                # 10m return is cumulative and must not masquerade as independent confirmation.
+                previous5=(float(prior.last_price)/float(older.last_price)-1)*100
                 r10=(float(newest.last_price)/float(older.last_price)-1)*100
                 side='buy' if r5>0 else 'sell'
+                direction=1 if side=='buy' else -1
+                aligned_previous=direction*previous5
+                # Conservative shrinkage proxy for the *next* interval, not an ML
+                # forecast: discount current momentum and only credit prior momentum
+                # when it pointed in the same direction. Outcome review will validate it.
+                continuation=max(0.0,0.65*abs(r5)+0.35*max(0.0,aligned_previous))
                 hurdle=_scalp_cost_hurdle_pct(snap.product,cfg,snap)
                 required=_scalp_required_move_pct(snap.product,cfg,snap)
-                edge=abs(r5)/hurdle if hurdle and hurdle>0 else None
+                edge=continuation/hurdle if hurdle and hurdle>0 else None
                 entry_depth=row['bid_depth_10_usdt'] if side=='sell' else row['ask_depth_10_usdt']
-                estimate=_scalp_estimated_net_pct(snap.product,cfg,snap,abs(r5))
-                row.update({'side':side,'entry_price_estimate':snap.ask if side=='buy' else snap.bid,'return_5m_pct':r5,'return_10m_pct':r10,
-                    'cost_hurdle_pct':hurdle,'required_move_pct':required,'edge_multiple':edge,
+                estimate=_scalp_estimated_net_pct(snap.product,cfg,snap,continuation)
+                row.update({'side':side,'entry_price_estimate':snap.ask if side=='buy' else snap.bid,
+                    'return_5m_pct':r5,'return_previous_5m_pct':previous5,'return_10m_pct':r10,
+                    'cost_hurdle_pct':hurdle,'required_move_pct':required,
+                    'expected_continuation_pct':continuation,'edge_multiple':edge,
                     'estimated_net_pct':estimate,'entry_depth_10_usdt':entry_depth})
                 if snap.product=='spot' and side=='sell':
                     row['reason']='Spot is long-only; bearish setup not shortable'
-                elif r5==0 or r5*r10<=0: row['reason']='5m and 10m momentum disagree'
-                elif abs(r5)<min_move: row['reason']=f'5m move {abs(r5):.3f}% below soft noise floor {min_move:.3f}%'
+                elif r5==0:
+                    row['reason']='No directional 5m impulse'
+                elif abs(r5)<min_move:
+                    row['reason']=f'5m move {abs(r5):.3f}% below soft noise floor {min_move:.3f}%'
+                elif aligned_previous < -min_move:
+                    row['reason']=f'Reversal: previous 5m interval moved {previous5:+.3f}% against the latest {r5:+.3f}% impulse'
                 elif entry_depth is not None and entry_depth<notional:
                     row['reason']=f'Top-10 entry-side depth {entry_depth:,.0f} USDT is below {notional:,.0f} USDT order size'
                 elif required is None or estimate<target_net:
-                    row['reason']=f'Observed move estimates {estimate:+.3f}% after modeled costs/reserve; target is +{target_net:.3f}%'
-                elif abs(r5)>=0.75 and abs(r5)>max(abs(r10)*1.8,0.25):
-                    row['reason']='Late impulse: latest 5m burst dwarfs its 10m move; follow-through not confirmed'
+                    row['reason']=f'Continuation proxy implies {estimate:+.3f}% net after modeled costs/reserve; target is +{target_net:.3f}%'
+                elif abs(r5)>=0.75 and abs(r5)>max(abs(previous5)*1.8,0.25):
+                    row['reason']='Late impulse: latest 5m burst is much larger than the preceding 5m interval'
                 else:
                     row['eligible']=True
-                    row['reason']='Liquidity/depth pass; aligned 5m+10m momentum and modeled net target screen passed (observed move is not a forecast)'
+                    row['reason']='Liquidity/depth pass; recent and preceding 5m momentum align and continuation proxy clears the net target (proxy not yet validated)'
         rows.append(row)
     rows.sort(key=lambda x:(not x['eligible'],-(x['estimated_net_pct'] if x['estimated_net_pct'] is not None else -999),-(x['turnover_usdt'] or 0)))
     return rows
@@ -1182,7 +1203,7 @@ def _record_scalper_scan(db: Session, now, mode, candidates):
     eligible=[x for x in candidates if x.get('eligible')][:15]
     rejected=[x for x in candidates if not x.get('eligible') and x.get('return_5m_pct') is not None]
     rejected.sort(key=lambda x:-(abs(float(x.get('return_5m_pct') or 0))/max(float(x.get('required_move_pct') or 0.01),0.01)))
-    keys=('product','pair','price','bid','ask','entry_price_estimate','side','return_5m_pct','return_10m_pct','turnover_usdt','spread_bps',
+    keys=('product','pair','price','bid','ask','entry_price_estimate','side','return_5m_pct','return_previous_5m_pct','return_10m_pct','expected_continuation_pct','turnover_usdt','spread_bps',
           'bid_depth_10_usdt','ask_depth_10_usdt','entry_depth_10_usdt','cost_hurdle_pct','required_move_pct',
           'estimated_net_pct','edge_multiple','eligible','reason')
     payload=[{k:x.get(k) for k in keys} for x in eligible+rejected[:25]]
@@ -1274,8 +1295,8 @@ def _run_scalper_lane(db: Session, now=None, mode='research', cfg_override=None)
                 'normal_slippage_pct','stress_slippage_pct','paper_cost_case','scalper_cost_case','scalper_spot_tax_pct',
                 'scalper_futures_tax_pct','scalper_tds_pct')}
             meta={'scalper_version':'0.2.0-dual-paper-tracks-cost-aware','mode':mode,'entry_reason':item['reason'],
-                'return_5m_pct':item.get('return_5m_pct'),'return_10m_pct':item.get('return_10m_pct'),
-                'required_move_pct':item.get('required_move_pct'),'estimated_net_pct':item.get('estimated_net_pct'),
+                'return_5m_pct':item.get('return_5m_pct'),'return_previous_5m_pct':item.get('return_previous_5m_pct'),'return_10m_pct':item.get('return_10m_pct'),
+                'expected_continuation_pct':item.get('expected_continuation_pct'),'required_move_pct':item.get('required_move_pct'),'estimated_net_pct':item.get('estimated_net_pct'),
                 'entry_bid':snap.bid,'entry_ask':snap.ask,'expected_move_not_forecast':abs(float(item.get('return_5m_pct') or 0)),
                 'turnover_usdt':item.get('turnover_usdt'),'spread_bps':item.get('spread_bps'),
                 'bid_depth_10_usdt':item.get('bid_depth_10_usdt'),'ask_depth_10_usdt':item.get('ask_depth_10_usdt'),

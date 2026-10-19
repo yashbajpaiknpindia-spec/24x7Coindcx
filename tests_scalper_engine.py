@@ -65,11 +65,27 @@ def run():
             db.add(snap)
             for observed_at, price in (
                 (now - timedelta(minutes=10), 100.0),
-                (now - timedelta(minutes=5), 100.05),
-                (now - timedelta(seconds=10), 100.75),
+                (now - timedelta(minutes=5), 100.48),
+                (now - timedelta(seconds=10), 101.00),
             ):
                 db.add(MarketObservation(
                     observed_at=observed_at, product="futures", pair="B-BTC_USDT",
+                    last_price=price, bid=price - 0.01, ask=price + 0.01,
+                    active=True, source_updated_at=observed_at,
+                ))
+            db.add(MarketSnapshot(
+                product="futures", pair="B-REV_USDT", last_price=100.20,
+                bid=100.18, ask=100.22, quote_turnover_usdt=50_000_000,
+                liquidity_source="test", active=True, exit_only=False,
+                updated_at=now, raw_json=json.dumps({"futures_orderbook":{"bids":{"100.18":"10"},"asks":{"100.22":"10"}}}),
+            ))
+            for observed_at, price in (
+                (now - timedelta(minutes=10), 100.0),
+                (now - timedelta(minutes=5), 100.50),
+                (now - timedelta(seconds=10), 100.20),
+            ):
+                db.add(MarketObservation(
+                    observed_at=observed_at, product="futures", pair="B-REV_USDT",
                     last_price=price, bid=price - 0.01, ask=price + 0.01,
                     active=True, source_updated_at=observed_at,
                 ))
@@ -81,6 +97,10 @@ def run():
             assert candidate["side"] == "buy", candidate
             assert candidate["cost_hurdle_pct"] > 0, candidate
             assert candidate["required_move_pct"] > candidate["cost_hurdle_pct"], candidate
+            assert candidate["expected_continuation_pct"] > 0, candidate
+            assert candidate["return_previous_5m_pct"] > 0, candidate
+            reversal = next(x for x in candidates if x["pair"] == "B-REV_USDT")
+            assert not reversal["eligible"] and "Reversal" in reversal["reason"], reversal
             assert candidate["bid_depth_10_usdt"] is not None and candidate["ask_depth_10_usdt"] is not None, candidate
             opened = run_scalper_cycle(db, now)
             assert opened["opened"] == 1, opened
