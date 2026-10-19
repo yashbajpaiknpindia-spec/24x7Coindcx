@@ -45,8 +45,8 @@ def run():
             now = utcnow()
             db.add(ConfigKV(key="strategy_config", value=json.dumps(CFG)))
             snap = MarketSnapshot(
-                product="futures", pair="B-BTC_USDT", last_price=100.75,
-                bid=100.74, ask=100.76, quote_turnover_usdt=50_000_000,
+                product="futures", pair="B-BTC_USDT", last_price=101.0,
+                bid=100.99, ask=101.01, quote_turnover_usdt=50_000_000,
                 liquidity_source="test", active=True, exit_only=False,
                 updated_at=now, raw_json="{}",
             )
@@ -54,7 +54,7 @@ def run():
             for observed_at, price in (
                 (now - timedelta(minutes=10), 100.0),
                 (now - timedelta(minutes=5), 100.30),
-                (now - timedelta(seconds=10), 100.75),
+                (now - timedelta(seconds=10), 101.0),
             ):
                 db.add(MarketObservation(
                     observed_at=observed_at, product="futures", pair="B-BTC_USDT",
@@ -76,9 +76,9 @@ def run():
     
             # Move executable bid up by >1%; paper position should close at bid,
             # with positive fees/slippage/tax reserve and target-based exit reason.
-            snap.last_price = 101.80
-            snap.bid = 101.79
-            snap.ask = 101.81
+            snap.last_price = 102.10
+            snap.bid = 102.09
+            snap.ask = 102.11
             snap.updated_at = now + timedelta(seconds=20)
             db.commit()
             closed = run_scalper_cycle(db, now + timedelta(seconds=20))
