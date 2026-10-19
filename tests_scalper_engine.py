@@ -90,6 +90,27 @@ def run():
                     last_price=price, bid=price - 0.01, ask=price + 0.01,
                     active=True, source_updated_at=observed_at,
                 ))
+            # This spot setup has enough momentum, liquidity and depth to pass
+            # signal gates, but its round-trip fee + GST + slippage + spread
+            # exceeds the configured 0.40% net-stop budget.
+            db.add(MarketSnapshot(
+                product="spot", pair="B-ETH_USDT", last_price=102.01,
+                bid=102.00, ask=102.02, quote_turnover_usdt=50_000_000,
+                liquidity_source="test", active=True, exit_only=False,
+                updated_at=now, raw_json=json.dumps({"spot_orderbook":{
+                    "bids":{"102.00":"20","101.99":"20"},
+                    "asks":{"102.02":"20","102.03":"20"}}}),
+            ))
+            for observed_at, price in (
+                (now - timedelta(minutes=10), 100.0),
+                (now - timedelta(minutes=5), 101.0),
+                (now - timedelta(seconds=10), 102.01),
+            ):
+                db.add(MarketObservation(
+                    observed_at=observed_at, product="spot", pair="B-ETH_USDT",
+                    last_price=price, bid=price-0.01, ask=price+0.01,
+                    active=True, source_updated_at=observed_at,
+                ))
             db.commit()
     
             candidates = build_scalper_scan(db, CFG, now)
@@ -102,6 +123,10 @@ def run():
             assert candidate["return_previous_5m_pct"] > 0, candidate
             reversal = next(x for x in candidates if x["pair"] == "B-REV_USDT")
             assert not reversal["eligible"] and "Reversal" in reversal["reason"], reversal
+            spot_cost_block = next(x for x in candidates if x["pair"] == "B-ETH_USDT")
+            assert not spot_cost_block["eligible"], spot_cost_block
+            assert "round-trip cost hurdle" in spot_cost_block["reason"].lower(), spot_cost_block
+            assert spot_cost_block["cost_hurdle_pct"] >= CFG["scalper_stop_net_pct"], spot_cost_block
             assert candidate["bid_depth_10_usdt"] is not None and candidate["ask_depth_10_usdt"] is not None, candidate
             opened = run_scalper_cycle(db, now)
             assert opened["opened"] == 1, opened
