@@ -68,7 +68,7 @@ scalper_context = {
     "profit_factor": None, "net_after_tax": 0, "open_net": 0, "eligible": 0,
     "scanned": 0, "sample_target": 50, "pf_validated": False},
 }
-review_stats = {h: {"evaluated": 0, "held_better": 0, "exit_better": 0, "avg_delta": None}
+review_stats = {h: {"evaluated": 0, "held_better": 0, "exit_better": 0, "potential_recovery": 0, "avg_delta": None}
                 for h in ("1h", "4h", "24h", "72h", "7d")}
 loss_context = {**base, "page": "loss_review", "trades": [],
                 "review_stats": review_stats, "observation_start": None,
