@@ -11,7 +11,7 @@
   <a class="brand" href="/dashboard"><span class="brand-mark">CX</span><span><b>STRATEGY</b><small>TERMINAL <i>v1.4.5</i></small></span></a>
   <div class="nav-label">WORKSPACE</div>
   <nav>
-    {% set navitems=[('dashboard','/dashboard','◫','Overview'),('markets','/markets','⌁','Markets & liquidity'),('strategy','/strategy','⌘','Strategy lab'),('paper','/paper','◉','Paper trading'),('live','/live','↗','Live execution'),('backtests','/backtests','▥','Backtest archive'),('capital','/capital','₹','Capital deployment'),('ledger','/ledger','≋','Execution ledger'),('telemetry','/telemetry','◌','Data quality')] %}
+    {% set navitems=[('dashboard','/dashboard','◫','Overview'),('markets','/markets','⌁','Markets & liquidity'),('strategy','/strategy','⌘','Strategy lab'),('paper','/paper','◉','Paper trading'),('scalper','/scalper','ϟ','Fast scalping'),('loss_review','/loss-review','↻','Loss review'),('live','/live','↗','Live execution'),('backtests','/backtests','▥','Backtest archive'),('capital','/capital','₹','Capital deployment'),('ledger','/ledger','≋','Execution ledger'),('telemetry','/telemetry','◌','Data quality')] %}
     {% for id,url,ico,label in navitems %}<a class="nav-item {% if page==id %}active{% endif %}" href="{{url}}"><span class="nav-icon">{{ico}}</span>{{label}}{% if id=='live' %}<span class="nav-state {% if live_trading_enabled %}state-amber{% else %}state-muted{% endif %}"></span>{% endif %}</a>{% endfor %}
   </nav>
   <div class="nav-label second-label">OPERATIONS</div><nav>
@@ -24,7 +24,7 @@
   </div>
 </aside>
 <main class="main">
-  <header class="topbar"><div class="top-left"><div class="eyebrow">COINDCX / RESEARCH & EXECUTION</div><h1>{{ title }}</h1></div><div class="top-right"><div class="mode-pill"><span class="live-dot"></span>PAPER DEFAULT</div><div class="live-pill {% if live_trading_enabled %}enabled{% endif %}"><span></span>LIVE {{ 'ENABLED BY ENV' if live_trading_enabled else 'LOCKED' }}</div><div class="avatar">AD</div></div></header>
+  <header class="topbar"><div class="top-left"><div class="eyebrow">COINDCX / RESEARCH & EXECUTION</div><h1>{{ title }}</h1></div><div class="top-right"><div class="mode-pill"><span class="live-dot"></span>PAPER DEFAULT</div><div class="mode-pill" title="All displayed times use Asia/Kolkata">IST · {{now_ist}}</div><div class="live-pill {% if live_trading_enabled %}enabled{% endif %}"><span></span>LIVE {{ 'ENABLED BY ENV' if live_trading_enabled else 'LOCKED' }}</div><div class="avatar">AD</div></div></header>
   <div class="content">
   {% block content %}{% endblock %}
   <footer class="footer"><span>CoinDCX Strategy Terminal · Research build 1.4.1</span><span>Market data and execution depend on CoinDCX API availability.</span></footer>

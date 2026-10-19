@@ -1,0 +1,35 @@
+{% extends 'base.html' %}{% block content %}
+<div class="page-intro"><div><h2>Was a losing trade closed too soon?</h2><p>Counterfactual revaluation of closed paper trades against stored CoinDCX prices after the actual exit. All timestamps shown in IST.</p></div><a class="text-link" href="/paper">← Paper trading</a></div>
+<div class="notice notice-amber"><b>Important limitation:</b> this is an endpoint comparison using stored market observations, not a proof that a position could safely have been held. Observations begin at {{observation_start|ist('%d %b %Y %H:%M') if observation_start else 'no recorded time'}} IST and end at {{observation_end|ist('%d %b %Y %H:%M') if observation_end else 'no recorded time'}} IST ({{observation_count}} rows). Data gaps are marked as unavailable instead of inventing a result. The existing strategy closes and protective stops remain part of the historical outcome.</div>
+<div class="stat-grid three">
+ <div class="stat-card"><div class="stat-top"><span>1-hour hold comparisons</span></div><div class="stat-value">{{review_stats['1h'].evaluated}}</div><div class="stat-foot">{{review_stats['1h'].held_better}} might have done better held · {{review_stats['1h'].exit_better}} exits were better at the endpoint</div></div>
+ <div class="stat-card"><div class="stat-top"><span>4-hour hold comparisons</span></div><div class="stat-value">{{review_stats['4h'].evaluated}}</div><div class="stat-foot">{{review_stats['4h'].held_better}} might have done better held · {{review_stats['4h'].exit_better}} exits were better at the endpoint</div></div>
+ <div class="stat-card"><div class="stat-top"><span>24-hour hold comparisons</span></div><div class="stat-value">{{review_stats['24h'].evaluated}}</div><div class="stat-foot">{{review_stats['24h'].held_better}} might have done better held · {{review_stats['24h'].exit_better}} exits were better at the endpoint</div></div>
+</div>
+<div class="stat-grid two">
+ <div class="stat-card"><div class="stat-top"><span>72-hour hold comparisons</span></div><div class="stat-value">{{review_stats['72h'].evaluated}}</div><div class="stat-foot">{{review_stats['72h'].held_better}} did better at endpoint · {{review_stats['72h'].potential_recovery}} losing trades had a positive sampled peak</div></div>
+ <div class="stat-card"><div class="stat-top"><span>7-day hold comparisons</span></div><div class="stat-value">{{review_stats['7d'].evaluated}}</div><div class="stat-foot">{{review_stats['7d'].held_better}} did better at endpoint · {{review_stats['7d'].potential_recovery}} losing trades had a positive sampled peak</div></div>
+</div>
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">CLOSED PAPER TRADES</div><h3>Actual exit versus 1h / 4h / 24h / 72h / 7-day hold</h3><p class="muted">Hypothetical P&amp;L keeps the original entry and quantity, marks at the target horizon's closest stored executable quote, includes modeled close costs and a product-specific reserve (spot: {{spot_tax_pct}}% planning reserve; futures: {{futures_tax_pct}}% assumed income-tax rate). It is not a liquidation-path reconstruction.</p></div><span class="tag">{{trades|length}} trades</span></div>
+<div class="table-wrap"><table><thead><tr><th>Trade</th><th>Open / exit (IST)</th><th>Pair / side</th><th>Actual exit reason</th><th>Actual net after estimated tax ₹</th><th>Horizon</th><th>Sample mark (IST)</th><th>Hypothetical net after tax ₹</th><th>Difference vs actual ₹</th><th>Review</th></tr></thead><tbody>
+{% for t in trades %}{% for r in t.review_rows %}
+<tr>
+<td class="mono">#{{t.id}}<div class="muted">{{'Research' if t.run_mode=='paper' else 'Capital mode'}}</div></td>
+<td class="mono">{{t.created_at|ist('%d-%m %H:%M') if t.created_at else '—'}}<div class="muted">{{t.closed_at|ist('%d-%m %H:%M') if t.closed_at else '—'}}</div></td>
+<td><b>{{t.pair}}</b><div class="muted">{{t.product|upper}} · {{t.side|upper}}</div></td>
+<td>{{t.reason or 'Exit reason missing'}}<div class="muted">{{t.diagnosis}}</div></td>
+<td class="mono {{'positive' if t.actual_after_tax>=0 else 'negative'}}">₹{{'%+.2f'|format(t.actual_after_tax)}}</td>
+<td><b>{{r.name}}</b><div class="muted">{{r.status}}</div></td>
+<td class="mono">{{r.at|ist('%d-%m %H:%M') if r.at is defined else '—'}}</td>
+<td class="mono {{'positive' if r.net_after_tax_inr is defined and r.net_after_tax_inr>=0 else 'negative' if r.net_after_tax_inr is defined else ''}}">{{'₹%+.2f'|format(r.net_after_tax_inr) if r.net_after_tax_inr is defined else '—'}}</td>
+<td class="mono {{'positive' if r.delta_inr is defined and r.delta_inr>0 else 'negative' if r.delta_inr is defined and r.delta_inr<0 else ''}}">{{'₹%+.2f'|format(r.delta_inr) if r.delta_inr is defined else '—'}}</td>
+<td>{{r.label}}<div class="muted">{{r.note}}</div></td>
+</tr>
+{% endfor %}{% endfor %}
+{% if not trades %}<tr><td colspan="10" class="empty">No closed paper trades available for revaluation yet.</td></tr>{% endif %}
+</tbody></table></div></section>
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">HOW TO READ IT</div><h3>What counts as a potentially wrong exit?</h3></div></div>
+<p>A horizon is labelled “potentially exited too early” only when the modeled after-tax endpoint would exceed the actual after-tax result by more than a small tolerance. It does not mean the position never hit a stop or liquidation price between samples. “Exit better than holding” means the sampled endpoint is worse than the actual exit, not that every stop was perfectly timed.</p>
+<p class="muted">Older trade records have incomplete entry-time snapshots. The page reuses stored five-minute quotes to calculate endpoint results plus the best/worst sampled executable-side P&amp;L after the exit. Longer horizons remain pending until enough post-exit observations accumulate. A positive peak is an ex-post possibility, not proof a chosen exit rule could have captured it or that a position would have survived drawdown. Modeled tax reserves are indicative, not a tax return; 30% VDA tax and 1% transfer TDS are based on Income Tax Department guidance, but specific futures/derivative treatment and eligibility/exemptions require professional verification.</p>
+</section>
+{% endblock %}

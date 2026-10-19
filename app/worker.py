@@ -2,11 +2,11 @@
 import os, time, traceback
 from datetime import datetime, timezone, timedelta
 from .db import Base, engine, SessionLocal
-from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, calculate_scores, run_paper_cycle, log_event, PAPER_ENGINE_VERSION
+from .core import initialize_defaults, read_config, write_config, refresh_markets, mark_paper_positions, calculate_scores, run_paper_cycle, log_event, PAPER_ENGINE_VERSION, run_scalper_cycle
 from .coindcx import CoinDCXClient
 from .live_engine import reconcile_live_account, collect_market_telemetry, run_auto_live_cycle
 
-POLL_SECONDS=max(20, int(os.getenv('MARKET_DATA_POLL_SECONDS','60')))
+POLL_SECONDS=max(20, int(os.getenv('MARKET_DATA_POLL_SECONDS','20')))
 RECONCILE_SECONDS=max(120, int(os.getenv('LIVE_RECONCILE_SECONDS','300')))
 PAPER_RETRY_SECONDS=max(60, int(os.getenv('PAPER_CYCLE_RETRY_SECONDS','900')))
 PAPER_SCORE_REFRESH_SECONDS=max(300, int(os.getenv('PAPER_SCORE_REFRESH_SECONDS','900')))
@@ -79,6 +79,9 @@ def main():
                 r['worker_last_heartbeat']=datetime.now(timezone.utc).isoformat(); write_config(db,'runtime',r)
                 refresh_result=refresh_markets(db)
                 mark_paper_positions(db)
+                # Paper scalper exits are checked on each refresh. Worker poll defaults to 20s;
+                # signal inputs still require completed 5-minute observations.
+                scalp_result=run_scalper_cycle(db)
                 telemetry=collect_market_telemetry(db)
                 cfg=read_config(db,'strategy_config',{})
                 if cfg.get('paper_enabled'):

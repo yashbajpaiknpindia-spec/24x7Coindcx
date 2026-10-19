@@ -19,3 +19,5 @@ jobs:
       - run: python -c "from jinja2 import Environment; from pathlib import Path; Environment().parse(Path('app/templates/paper.html').read_text())"
       - run: python tests_paper_risk_controls.py
       - run: python tests_paper_decision_audit.py
+      - run: python tests_paper_ui_render.py
+      - run: python tests_scalper_engine.py
