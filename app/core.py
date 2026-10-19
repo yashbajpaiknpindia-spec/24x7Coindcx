@@ -1079,7 +1079,7 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
     for snap in snapshots:
         spread_bps = _scalp_spread_bps(snap)
         row = {'product':snap.product,'pair':snap.pair,'price':snap.last_price,
-            'turnover_usdt':snap.quote_turnover_usdt,'spread_bps':spread_bps,
+            'turnover_usdt':snap.quote_turnover_usdt,'spread_bps':spread_bps,'bid':snap.bid,'ask':snap.ask,'entry_price_estimate':None,
             'side':'—','return_5m_pct':None,'return_10m_pct':None,'cost_hurdle_pct':None,
             'required_move_pct':None,'estimated_net_pct':None,'edge_multiple':None,
             'bid_depth_10_usdt':_scalp_orderbook_depth(snap,'buy',10),
@@ -1113,7 +1113,7 @@ def build_scalper_scan(db: Session, cfg: dict | None = None, now=None):
                 edge=abs(r5)/hurdle if hurdle and hurdle>0 else None
                 entry_depth=row['bid_depth_10_usdt'] if side=='sell' else row['ask_depth_10_usdt']
                 estimate=_scalp_estimated_net_pct(snap.product,cfg,snap,abs(r5))
-                row.update({'side':side,'return_5m_pct':r5,'return_10m_pct':r10,
+                row.update({'side':side,'entry_price_estimate':snap.ask if side=='buy' else snap.bid,'return_5m_pct':r5,'return_10m_pct':r10,
                     'cost_hurdle_pct':hurdle,'required_move_pct':required,'edge_multiple':edge,
                     'estimated_net_pct':estimate,'entry_depth_10_usdt':entry_depth})
                 if snap.product=='spot' and side=='sell':
@@ -1172,7 +1172,7 @@ def _record_scalper_scan(db: Session, now, mode, candidates):
     eligible=[x for x in candidates if x.get('eligible')][:15]
     rejected=[x for x in candidates if not x.get('eligible') and x.get('return_5m_pct') is not None]
     rejected.sort(key=lambda x:-(abs(float(x.get('return_5m_pct') or 0))/max(float(x.get('required_move_pct') or 0.01),0.01)))
-    keys=('product','pair','price','side','return_5m_pct','return_10m_pct','turnover_usdt','spread_bps',
+    keys=('product','pair','price','bid','ask','entry_price_estimate','side','return_5m_pct','return_10m_pct','turnover_usdt','spread_bps',
           'bid_depth_10_usdt','ask_depth_10_usdt','entry_depth_10_usdt','cost_hurdle_pct','required_move_pct',
           'estimated_net_pct','edge_multiple','eligible','reason')
     payload=[{k:x.get(k) for k in keys} for x in eligible+rejected[:25]]
