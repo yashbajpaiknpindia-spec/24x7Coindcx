@@ -696,6 +696,13 @@ def scalper_review_page(request: Request):
             mode=episode['mode']
             at=_as_utc(episode['scanned_at'])
             mode_notional=episode['mode_notional']
+            audit_settings=cand.get('_audit_settings') or {}
+            sample_notional=float(audit_settings.get('scalper_notional_usdt') or mode_notional)
+            sample_fx=float(audit_settings.get('inr_per_usdt') or fx)
+            sample_cfg=dict(cfg)
+            sample_cfg.update(audit_settings)
+            target_pct=float(audit_settings.get('scalper_target_net_pct',cfg.get('scalper_target_net_pct',0.15)))
+            stop_pct=abs(float(audit_settings.get('scalper_stop_net_pct',cfg.get('scalper_stop_net_pct',0.40))))
             side=cand.get('side')
             entry=float(cand.get('entry_price_estimate') or (cand.get('ask') if side=='buy' else cand.get('bid') if cand.get('bid') else cand.get('price')) or cand.get('price'))
             if entry<=0: continue
@@ -710,9 +717,9 @@ def scalper_review_page(request: Request):
                 late_impulse=abs(r5)>=0.75 and abs(r5)>max(abs(previous5)*1.8,0.25)
                 if depth is None:
                     counterfactual='Reversal rejection; entry depth unknown'
-                elif float(depth)<mode_notional:
+                elif float(depth)<sample_notional:
                     counterfactual='Reversal plus entry-depth gate would still fail'
-                elif estimate is None or float(estimate)<float(cfg.get('scalper_target_net_pct',0.15)):
+                elif estimate is None or float(estimate)<target_pct:
                     counterfactual='Reversal plus modeled net-edge gate would still fail'
                 elif late_impulse:
                     counterfactual='Reversal plus late-impulse gate would still fail'
@@ -730,13 +737,11 @@ def scalper_review_page(request: Request):
                 if not exit_price or exit_price<=0: sampled[mins]=None; continue
                 TradeLike=type('TradeLike',(),{})
                 fake=TradeLike(); fake.product=cand.get('product'); fake.side=side; fake.entry_price=entry
-                fake.quantity=mode_notional/entry
-                mark=_scalp_calculate(fake,float(exit_price),cfg,fx)
+                fake.quantity=sample_notional/entry
+                mark=_scalp_calculate(fake,float(exit_price),sample_cfg,sample_fx)
                 sampled[mins]={'net':mark['net_after_tax'],'at':obs.observed_at}
-            net5_pct=(sampled[5]['net']/(mode_notional*fx)*100) if sampled[5] and mode_notional>0 and fx>0 else None
-            net10_pct=(sampled[10]['net']/(mode_notional*fx)*100) if sampled[10] and mode_notional>0 and fx>0 else None
-            target_pct=float(cfg.get('scalper_target_net_pct',0.15))
-            stop_pct=abs(float(cfg.get('scalper_stop_net_pct',0.40)))
+            net5_pct=(sampled[5]['net']/(sample_notional*sample_fx)*100) if sampled[5] and sample_notional>0 and sample_fx>0 else None
+            net10_pct=(sampled[10]['net']/(sample_notional*sample_fx)*100) if sampled[10] and sample_notional>0 and sample_fx>0 else None
             outcome='Insufficient samples'
             for minute, pct in ((5,net5_pct),(10,net10_pct)):
                 if pct is None: continue
