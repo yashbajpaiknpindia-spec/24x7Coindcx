@@ -1,5 +1,6 @@
 import os, json, secrets, hmac, csv, io, re, math
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -8,10 +9,10 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from sqlalchemy import select, desc, func, text
 from sqlalchemy.orm import Session
-from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
+from .db import Base, engine, SessionLocal, ConfigKV, Event, MarketSnapshot, PaperPosition, PaperModePosition, MarketObservation, PaperDecisionAudit, Trade, ScalpTrade, OrderRecord, BacktestResult, ExecutionFill, LedgerEntry, AccountSnapshot, TelemetrySnapshot, StrategyPosition, utcnow
 from .coindcx import CoinDCXClient, CoinDCXError
 from .core import (initialize_defaults, read_config, write_config, log_event, refresh_markets, market_eligibility,
-                   market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle,
+                   market_spread_bps, _entry_cost_hurdle_pct, dashboard_summary, paper_equity, mark_paper_positions, run_paper_cycle, build_scalper_scan, run_scalper_cycle, _scalp_calculate,
                    PAIR_UNIVERSE, STRATEGY_ID, STRATEGY_NAME, STRATEGY_VERSION, norm_pair, safe_json, env_float, env_int)
 from .live_engine import (reconcile_live_account, collect_market_telemetry, run_auto_live_cycle, latest_account_snapshot, latest_telemetry, _live_quality, _list_data, _assets, _free_balance, _futures_free_wallet, _metadata_quantity, _normalize_exchange_status)
 
@@ -24,10 +25,25 @@ ADMIN_PASSWORD_CONFIGURED = len(ADMIN_PASSWORD) >= 14 and ADMIN_PASSWORD.lower()
 LIVE_TRADING_ENABLED = os.getenv('LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 AUTO_LIVE_TRADING_ENABLED = os.getenv('AUTO_LIVE_TRADING_ENABLED', 'false').lower() == 'true'
 
-app = FastAPI(title=APP_NAME, version='1.6.0', docs_url='/api/docs')
+app = FastAPI(title=APP_NAME, version='1.7.0', docs_url='/api/docs')
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site='lax', https_only=os.getenv('COOKIE_SECURE','false').lower() == 'true', session_cookie='cdx_terminal_session', max_age=60*60*12)
 app.mount('/static', StaticFiles(directory=str(ROOT/'app'/'static')), name='static')
 templates = Jinja2Templates(directory=str(ROOT/'app'/'templates'))
+IST = ZoneInfo('Asia/Kolkata')
+
+def _format_ist(value, fmt='%d %b %Y %H:%M IST'):
+    if value is None:
+        return '—'
+    try:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(IST).strftime(fmt)
+    except Exception:
+        return str(value)
+
+templates.env.filters['ist'] = _format_ist
 
 @app.on_event('startup')
 def on_startup():
@@ -54,7 +70,7 @@ def health():
     try:
         with SessionLocal() as db:
             db.execute(select(ConfigKV.key).limit(1)).all()
-        return {'ok': True, 'service': APP_NAME, 'version': '1.6.0', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
+        return {'ok': True, 'service': APP_NAME, 'version': '1.7.0', 'database': 'reachable', 'admin_auth_configured': ADMIN_PASSWORD_CONFIGURED, 'live_trading_enabled': LIVE_TRADING_ENABLED, 'auto_live_env_enabled': AUTO_LIVE_TRADING_ENABLED}
     except Exception as exc:
         return JSONResponse({'ok': False, 'error': str(exc)[:200]}, status_code=503)
 
@@ -77,7 +93,7 @@ def context(request: Request, page: str, title: str, **extra):
            'api_key_configured':bool(os.getenv('COINDCX_API_KEY')),'api_secret_configured':bool(os.getenv('COINDCX_API_SECRET')),
            'admin_password_configured':ADMIN_PASSWORD_CONFIGURED,
            'csrf_token':request.session.get('csrf',''),
-           'now_utc':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+           'now_utc':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'), 'now_ist':datetime.now(timezone.utc).astimezone(IST).strftime('%d %b %Y %I:%M:%S %p IST')}
     ctx.update(extra)
     return ctx
 
@@ -172,6 +188,154 @@ def api_dashboard(request: Request):
         summary=dashboard_summary(db); eq=summary['paper_equity']
         markets=db.scalars(select(MarketSnapshot).order_by(desc(MarketSnapshot.quote_turnover_usdt)).limit(20)).all()
         return {'summary':summary,'markets':[{'product':m.product,'pair':m.pair,'last_price':m.last_price,'bid':m.bid,'ask':m.ask,'turnover':m.quote_turnover_usdt,'updated_at':m.updated_at.isoformat()} for m in markets]}
+
+def _as_utc(value):
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+@app.get('/loss-review', response_class=HTMLResponse)
+def loss_review_page(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login', status_code=303)
+    now=datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        runtime=read_config(db,'runtime',{})
+        tax_pct=float(cfg.get('scalper_tax_pct',30))
+        fx=float(cfg.get('inr_per_usdt',94.75))
+        trades=db.scalars(select(Trade).where(Trade.run_mode.in_(['paper','paper_capital']),Trade.status=='closed').order_by(desc(Trade.closed_at)).limit(200)).all()
+        coverage=db.execute(select(func.min(MarketObservation.observed_at),func.max(MarketObservation.observed_at),func.count(MarketObservation.id))).one()
+        first_obs,last_obs,obs_count=coverage
+        summaries={h:{'evaluated':0,'held_better':0,'exit_better':0,'avg_delta':None,'_deltas':[]} for h in ('1h','4h','24h')}
+        rows=[]
+        for t in trades:
+            opened=_as_utc(t.created_at); closed=_as_utc(t.closed_at)
+            metadata=safe_json(t.metadata_json or '{}')
+            actual_tax=max(0.0,float(t.gross_pnl_inr or 0))*tax_pct/100
+            actual_after_tax=float(t.net_pnl_inr or 0)-actual_tax
+            t.actual_after_tax=actual_after_tax
+            t.diagnosis=_paper_trade_diagnosis(t)
+            horizon_rows=[]
+            entry_notional=abs(float(t.quantity or 0)*float(t.entry_price or 0))
+            fee_pct=float(cfg.get('spot_fee_pct' if t.product=='spot' else 'futures_fee_pct',0.15 if t.product=='spot' else 0.075))/100
+            slip_pct=float(cfg.get('normal_slippage_pct',0.05))/100 if cfg.get('paper_cost_case','NORMAL')=='NORMAL' else float(cfg.get('stress_slippage_pct',0.12))/100
+            for key,delta in (('1h',timedelta(hours=1)),('4h',timedelta(hours=4)),('24h',timedelta(hours=24))):
+                if not closed:
+                    horizon_rows.append({'name':key,'status':'Unavailable','label':'No close timestamp','note':'No closed timestamp to anchor this comparison.'})
+                    continue
+                target=closed+delta
+                if target>now:
+                    horizon_rows.append({'name':key,'status':'Pending','label':'Horizon not reached','note':'Wait until the full horizon has elapsed.'})
+                    continue
+                tolerance=timedelta(minutes=15)
+                obs=db.scalars(select(MarketObservation).where(
+                    MarketObservation.product==t.product,MarketObservation.pair==t.pair,
+                    MarketObservation.observed_at>=target,
+                    MarketObservation.observed_at<=target+tolerance
+                ).order_by(MarketObservation.observed_at.asc()).limit(1)).first()
+                if not obs or not obs.last_price or not t.entry_price or not t.quantity:
+                    horizon_rows.append({'name':key,'status':'Insufficient data','label':'Cannot judge',
+                        'note':'No stored 5-minute market observation close enough to the target time. This is not evidence that the exit was right or wrong.'})
+                    continue
+                # Hypothetical hold: same original entry and quantity, marked at the closest
+                # recorded executable exit quote at the horizon. This cannot recover hidden intrabar highs/lows.
+                fallback=not bool(obs.bid and obs.ask)
+                future_exit=float((obs.bid if t.side=='buy' else obs.ask) if (obs.bid if t.side=='buy' else obs.ask) else obs.last_price)
+                direction=1 if t.side=='buy' else -1
+                gross=(future_exit-float(t.entry_price))*float(t.quantity)*direction*fx
+                exit_notional=abs(float(t.quantity)*future_exit)
+                fees=(entry_notional+exit_notional)*fee_pct*fx
+                slips=(entry_notional+exit_notional)*slip_pct*fx
+                elapsed_hours=max(0,(target-opened).total_seconds()/3600) if opened else delta.total_seconds()/3600
+                funding=0.0
+                if t.product=='futures' and cfg.get('paper_cost_case')=='STRESS':
+                    funding=entry_notional*(float(cfg.get('funding_stress_pct_per_8h',0.01))/100)*(elapsed_hours/8)*fx
+                tax=max(0.0,gross)*tax_pct/100
+                after_tax=gross-fees-slips-funding-tax
+                delta_net=after_tax-actual_after_tax
+                tolerance_inr=max(5.0,entry_notional*fx*0.001)
+                if delta_net>tolerance_inr:
+                    label='Potentially exited too early'
+                elif delta_net < -tolerance_inr:
+                    label='Exit better than holding to this point'
+                else:
+                    label='Similar result at this point'
+                row={'name':key,'status':'Evaluated','label':label,'gross_inr':gross,'fees_inr':fees,
+                    'slippage_inr':slips,'funding_inr':funding,'tax_inr':tax,'net_after_tax_inr':after_tax,
+                    'delta_inr':delta_net,'at':obs.observed_at,'price':future_exit,
+                    'note':('Used last-price fallback because executable bid/ask was missing. ' if fallback else '')+
+                           'Endpoint comparison only; it does not show the path between checks or prove a position would have survived.'}
+                horizon_rows.append(row)
+                summ=summaries[key]; summ['evaluated']+=1; summ['_deltas'].append(delta_net)
+                if delta_net>tolerance_inr: summ['held_better']+=1
+                elif delta_net < -tolerance_inr: summ['exit_better']+=1
+            t.review_rows=horizon_rows
+            rows.append(t)
+        for summ in summaries.values():
+            summ['avg_delta']=sum(summ['_deltas'])/len(summ['_deltas']) if summ['_deltas'] else None
+            summ.pop('_deltas',None)
+    return templates.TemplateResponse('loss_review.html',context(request,'loss_review','Loss re-evaluation',trades=rows,review_stats=summaries,
+        observation_start=first_obs,observation_end=last_obs,observation_count=obs_count,tax_pct=tax_pct,runtime=runtime))
+
+
+@app.get('/scalper', response_class=HTMLResponse)
+def scalper_page(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login', status_code=303)
+    now=datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        runtime=read_config(db,'runtime',{})
+        candidates=build_scalper_scan(db,cfg,now)
+        trades=db.scalars(select(ScalpTrade).order_by(desc(ScalpTrade.opened_at)).limit(100)).all()
+        closed=db.scalars(select(ScalpTrade).where(ScalpTrade.status=='closed').order_by(desc(ScalpTrade.closed_at)).limit(500)).all()
+        open_trades=[t for t in trades if t.status=='open']
+        winners=[float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0)>0]
+        losers=[float(t.net_after_tax_inr or 0) for t in closed if (t.net_after_tax_inr or 0)<0]
+        pf=sum(winners)/abs(sum(losers)) if losers else None
+        open_marked=sum(float(t.unrealized_net_after_tax_inr or 0) for t in open_trades)
+        net=sum(float(t.net_after_tax_inr or 0) for t in closed)
+        stats={'open':len(open_trades),'closed':len(closed),'wins':len(winners),'losses':len(losers),
+               'profit_factor':pf,'net_after_tax':net,'open_net':open_marked,
+               'eligible':sum(1 for x in candidates if x['eligible']),
+               'scanned':len(candidates),'sample_target':50,
+               'pf_validated':len(closed)>=50 and pf is not None and pf>=1.25}
+        for t in trades:
+            opened=_as_utc(t.opened_at)
+            ended=_as_utc(t.closed_at) if t.closed_at else now
+            t.held_minutes=max(0,(ended-opened).total_seconds()/60) if opened else 0
+            t.entry_reason=safe_json(t.metadata_json or '{}').get('entry_reason','—')
+    return templates.TemplateResponse('scalper.html',context(request,'scalper','Fast scalping lab',cfg=cfg,runtime=runtime,
+        candidates=candidates[:100],trades=trades,scalper_stats=stats))
+
+
+@app.post('/scalper/start')
+def scalper_start(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login',status_code=303)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        cfg['scalper_enabled']=True
+        write_config(db,'strategy_config',cfg)
+        log_event(db,'Fast scalping paper simulation enabled. No exchange orders were sent.','INFO','scalper')
+        db.commit()
+    return RedirectResponse('/scalper?started=1',status_code=303)
+
+
+@app.post('/scalper/pause')
+def scalper_pause(request: Request):
+    if not authed(request):
+        return RedirectResponse('/login',status_code=303)
+    with SessionLocal() as db:
+        cfg=read_config(db,'strategy_config',{})
+        cfg['scalper_enabled']=False
+        write_config(db,'strategy_config',cfg)
+        log_event(db,'Fast scalping paper simulation paused. Existing positions remain monitored and can exit under their risk rules.','WARNING','scalper')
+        db.commit()
+    return RedirectResponse('/scalper?paused=1',status_code=303)
+
 
 @app.get('/paper', response_class=HTMLResponse)
 def paper_page(request: Request):
@@ -780,12 +944,18 @@ def _paper_trade_diagnosis(trade):
     metadata=safe_json(trade.metadata_json or '{}')
     if trade.status != 'closed':
         return 'Open paper position; outcome is not known yet.'
-    if metadata.get('diagnosis'):
-        return str(metadata['diagnosis'])
     gross=float(trade.gross_pnl_inr or 0)
     net=float(trade.net_pnl_inr or 0)
     costs=float(trade.fees_inr or 0)+float(trade.slippage_inr or 0)+float(trade.funding_inr or 0)
     reason=str(trade.reason or metadata.get('exit_reason') or 'exit reason not recorded')
+    entry_score=metadata.get('score')
+    momentum=metadata.get('momentum_pct')
+    if entry_score is not None and ((trade.side == 'buy' and float(entry_score) < 0) or (trade.side == 'sell' and float(entry_score) > 0)):
+        return f'ENTRY-SIGNAL MISMATCH: stored 14D score {float(entry_score):.2f} did not agree with the {trade.side.upper()} direction. This is evidence of a weak/inconsistent entry, not proof of the full intratrade path.'
+    if momentum is not None and abs(float(momentum)) >= 100:
+        return f'POSSIBLE LATE ENTRY: stored 14D momentum was extreme ({float(momentum):+.1f}%). It may be a spike-chase; candles immediately before entry are unavailable to prove entry timing.'
+    if metadata.get('diagnosis'):
+        return str(metadata['diagnosis'])
     if gross > 0 and net <= 0:
         return 'Gross trade gain was erased by modeled fees/slippage/funding.'
     if 'hard stop' in reason.lower() or 'persistent loss' in reason.lower():
