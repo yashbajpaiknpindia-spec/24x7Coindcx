@@ -44,6 +44,8 @@ def _format_ist(value, fmt='%d %b %Y %H:%M IST'):
         return str(value)
 
 templates.env.filters['ist'] = _format_ist
+# Keep older Jinja templates using abs(value) from returning HTTP 500.
+templates.env.globals['abs'] = abs
 
 @app.on_event('startup')
 def on_startup():
