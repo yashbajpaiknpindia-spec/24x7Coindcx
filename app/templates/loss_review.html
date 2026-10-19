@@ -13,16 +13,21 @@
  <div class="stat-card"><div class="stat-top"><span>72-hour hold comparisons</span></div><div class="stat-value">{{review_stats['72h'].evaluated}}</div><div class="stat-foot">{{review_stats['72h'].held_better}} did better at endpoint · {{review_stats['72h'].potential_recovery}} losing trades had a positive sampled peak</div></div>
  <div class="stat-card"><div class="stat-top"><span>7-day hold comparisons</span></div><div class="stat-value">{{review_stats['7d'].evaluated}}</div><div class="stat-foot">{{review_stats['7d'].held_better}} did better at endpoint · {{review_stats['7d'].potential_recovery}} losing trades had a positive sampled peak</div></div>
 </div>
-<section class="panel"><div class="panel-head"><div><div class="eyebrow">CLOSED PAPER TRADES</div><h3>One row per trade · compare horizons across columns</h3><p class="muted">Each horizon shows its status and after-tax difference versus the actual exit. Historical extremes are not guaranteed fills; a favourable later mark does not prove a position could safely have been held.</p></div><span class="tag">{{trades|length}} trades</span></div>
-<div class="table-wrap"><table><thead><tr><th>Trade / mode</th><th>Pair / side</th><th>Actual net</th><th>Exit &amp; timing diagnosis</th><th>1h</th><th>4h</th><th>24h</th><th>72h</th><th>7d</th></tr></thead><tbody>
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">CLOSED PAPER TRADES</div><h3>One row per trade · all horizons side by side</h3><p class="muted">Endpoint differences are modeled with the same entry and quantity, quote/candle outcome where available, close costs and the configured tax reserve. Historical highs/lows are not guaranteed fills or proof the position survives its path.</p></div><span class="tag">{{trades|length}} trades</span></div>
+<div class="table-wrap"><table><thead><tr><th>Trade / open → close</th><th>Pair / side</th><th>Actual net after reserve</th><th>Exit &amp; timing diagnosis</th><th>1h</th><th>4h</th><th>24h</th><th>72h</th><th>7d</th></tr></thead><tbody>
 {% for t in trades %}
 <tr>
-<td class="mono">#{{t.id}}<div class="muted">{{'Research' if t.run_mode=='paper' else 'Capital mode'}}</div><div class="muted">{{t.created_at|ist('%d-%m %H:%M') if t.created_at else '—'}}</div></td>
+<td class="mono">#{{t.id}}<div class="muted">{{'Research' if t.run_mode=='paper' else 'Capital mode'}}</div><div class="muted">{{t.created_at|ist('%d-%m %H:%M') if t.created_at else '—'}}</div><div class="muted">Closed {{t.closed_at|ist('%d-%m %H:%M') if t.closed_at else '—'}}</div></td>
 <td><b>{{t.pair}}</b><div class="muted">{{t.product|upper}} · {{t.side|upper}}</div></td>
 <td class="mono {{'positive' if t.actual_after_tax>=0 else 'negative'}}">₹{{'%+.2f'|format(t.actual_after_tax)}}</td>
-<td><b>{{t.reason or 'Exit reason missing'}}</b><div class="muted">{{t.diagnosis}}</div><div class="muted"><b>Timing:</b> {{t.entry_timing_diagnosis}}</div></td>
+<td><b>{{t.reason or 'Exit reason missing'}}</b><div class="muted">{{t.diagnosis}}</div><div class="muted"><b>Entry timing:</b> {{t.entry_timing_diagnosis}}</div></td>
 {% for horizon in ['1h','4h','24h','72h','7d'] %}
-<td>{% for r in t.review_rows if r.name==horizon %}<b>{{r.status}}</b><div class="mono {{'positive' if r.delta_inr is defined and r.delta_inr>0 else 'negative' if r.delta_inr is defined and r.delta_inr<0 else ''}}">{{'₹%+.2f'|format(r.delta_inr) if r.delta_inr is defined else '—'}}</div><div class="muted">{{r.label}}</div>{% endfor %}</td>
+<td>{% for r in t.review_rows if r.name==horizon %}
+<b>{{r.status}}</b>
+<div class="mono {{'positive' if r.delta_inr is defined and r.delta_inr>0 else 'negative' if r.delta_inr is defined and r.delta_inr<0 else ''}}">{{'₹%+.2f'|format(r.delta_inr) if r.delta_inr is defined else '—'}}</div>
+<div class="muted">{{r.label}}</div>
+{% if r.note %}<details><summary>Details</summary><p class="muted">{{r.note}}</p></details>{% endif %}
+{% endfor %}</td>
 {% endfor %}
 </tr>
 {% endfor %}
