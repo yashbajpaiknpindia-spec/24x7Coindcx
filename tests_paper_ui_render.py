@@ -15,6 +15,7 @@ def ist(value, fmt="%d %b %Y %H:%M IST"):
     return value.astimezone(ZoneInfo("Asia/Kolkata")).strftime(fmt)
 
 env.filters["ist"] = ist
+env.globals["abs"] = abs
 base = {
     "request": object(), "page": "paper", "title": "Smoke test",
     "app_name": "CoinDCX Test", "summary": {"config": {"paper_enabled": True},
@@ -92,4 +93,5 @@ assert env.from_string("{{ (t.quantity * t.entry_price)|abs }}").render(
 ) == "10"
 now = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
 assert ist(now, "%H:%M") == "05:30", ist(now, "%H:%M")
-print("PAPER UI RENDER REGRESSION PASSED: paper, ledger, scalper and loss-review templates render; IST and abs filter work.")
+assert env.from_string("{{ abs(-8) }}").render() == "8"
+print("PAPER UI RENDER REGRESSION PASSED: paper, ledger, scalper and loss-review templates render; IST and abs builtin work.")
