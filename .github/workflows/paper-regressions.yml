@@ -22,3 +22,26 @@ jobs:
       - run: python tests_paper_ui_render.py
       - run: python tests_scalper_engine.py
       - run: python tests_loss_review_candles.py
+
+  # This job is deliberately isolated to the draft research branch.
+  # It reads public candle endpoints only and does not run or modify the app.
+  six-month-scalping-research:
+    if: github.event_name == 'pull_request' && github.head_ref == 'research/six-month-scalping-audit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas requests
+      - name: Download and audit six months of public candles
+        run: python research/six_month_scalping_audit/download_six_month_candles.py
+      - name: Upload read-only candle archive and manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coindcx-six-month-public-candles
+          path: research_artifacts/six_month_scalping_audit/
+          if-no-files-found: warn
+          retention-days: 30
