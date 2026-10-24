@@ -1,0 +1,62 @@
+name: Archive legacy root CoinDCX application
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/archive-legacy-root.yml"
+permissions:
+  contents: write
+jobs:
+  archive-legacy-root:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Move the legacy root project under archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p archive/legacy-coindcx-terminal
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              binance-copy-intelligence/*|archive/*|.github/*|.gitignore)
+                continue
+                ;;
+            esac
+            [ -f "$file" ] || continue
+            destination="archive/legacy-coindcx-terminal/$file"
+            mkdir -p "$(dirname "$destination")"
+            git mv "$file" "$destination"
+          done < <(git ls-files -z)
+
+          cat > README.md <<'README'
+          # Binance Copy Intelligence
+
+          The fresh application lives in `binance-copy-intelligence/`. Its Render service is configured to build from that directory only, so the legacy CoinDCX Strategy Terminal is not part of the active application UI.
+
+          ## Active application
+
+          - App: https://binance-copy-intelligence-v2.onrender.com
+          - Source directory: `binance-copy-intelligence/`
+          - Legacy root project: preserved under `archive/legacy-coindcx-terminal/`
+
+          The former root-level CoinDCX Strategy Terminal files were moved intact into the archive path to keep the active project separate while preserving the source history. Do not deploy the archived project as the Binance app.
+          README
+
+          cat > archive/legacy-coindcx-terminal/ARCHIVE-NOTICE.md <<'ARCHIVE'
+          # Archived legacy CoinDCX Strategy Terminal
+
+          These files were previously stored at the repository root and belong to the legacy CoinDCX Strategy Terminal. They have been retained for reference/rollback and are not part of the fresh Binance Copy Intelligence application.
+
+          The active Binance app is isolated under `binance-copy-intelligence/`.
+          ARCHIVE
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Archive legacy root CoinDCX UI and keep fresh Binance app isolated"
+            git push
+          fi
