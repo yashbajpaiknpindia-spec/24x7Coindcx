@@ -699,6 +699,8 @@ def access_gate():
 '''
 new_gate = '''@app.before_request
 def access_gate():
+    if request.endpoint == "login" and request.method == "POST" and request.form.get("username", "admin").strip() != APP_USERNAME:
+        return render_template("login.html", error="Username or password did not match."), 401
     if request.endpoint in ("login", "logout", "health", "static"):
         return None
     if not APP_PASSWORD:
@@ -734,15 +736,6 @@ if new_login not in s:
     if s.count(old_login) != 1:
         raise RuntimeError(f"Cannot lock sign-in when password is missing: anchor count={s.count(old_login)}")
     s = s.replace(old_login,new_login,1)
-
-# The legacy reference screen asks for username and password; validate both.
-login_auth_old = 'supplied=request.form.get("password", "")\n        if secrets.compare_digest(supplied, APP_PASSWORD):'
-login_auth_new = 'supplied_username=request.form.get("username", "admin").strip()\n        supplied=request.form.get("password", "")\n        if secrets.compare_digest(supplied_username, APP_USERNAME) and secrets.compare_digest(supplied, APP_PASSWORD):'
-if login_auth_new not in s:
-    if s.count(login_auth_old) != 1:
-        raise RuntimeError(f"Cannot apply username authentication: anchor count={s.count(login_auth_old)}")
-    s = s.replace(login_auth_old, login_auth_new, 1)
-s=s.replace('error="Password did not match."', 'error="Username or password did not match."')
 
 status_anchor = '"scheduler_enabled":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")'
 status_new = '"durable_storage":_durable_database_configured(),"storage_warning":(None if _durable_database_configured() else "Persistent PostgreSQL is not connected; mutating operations and automatic scans are blocked to prevent data loss."),"scheduler_requested":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"),"scheduler_enabled":(_durable_database_configured() and os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"))'
