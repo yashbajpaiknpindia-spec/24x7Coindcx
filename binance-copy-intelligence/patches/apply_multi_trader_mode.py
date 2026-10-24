@@ -231,7 +231,7 @@ login.write_text(r"""<!doctype html>
 <div class="mobile-brand brand"><span class="mark">BI</span><span>BINANCE COPY<small>INTELLIGENCE WORKSPACE</small></span></div>
 <div class="eyebrow">PRIVATE WORKSPACE</div><h2>Welcome back</h2><p class="sub">Sign in to your copy-trader analysis console.</p>
 {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
-<form method="post"><label for="password">Workspace password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required autofocus><button class="primary" type="submit">Unlock workspace →</button></form>
+<form method="post"><label for="username">Username</label><input id="username" name="username" type="text" autocomplete="username" value="admin" placeholder="admin" required><label for="password" style="margin-top:16px">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required autofocus><button class="primary" type="submit">Unlock workspace →</button></form>
 <div class="security"><span class="dot"></span><span><b style="color:#dce8f2">Analysis-only access.</b> This app does not submit orders, withdraw funds, or change your Binance account. API key values are never displayed in this interface.</span></div>
 <div class="footer">Binance Copy Intelligence · Research evidence first<br>Missing source history is reported, never invented.</div>
 </div></section>
@@ -383,6 +383,7 @@ if marker not in s:
     anchor = 'app = Flask(__name__)\n'
     block = '''app = Flask(__name__)
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+APP_USERNAME = os.getenv("APP_USERNAME", "admin").strip()
 _startup_database_url = os.getenv("DATABASE_URL", "").strip()
 _startup_db_backend = "PostgreSQL" if _startup_database_url.startswith(("postgres://", "postgresql://", "postgresql+")) else "SQLite local fallback"
 app.logger.info("startup_config database_backend=%s database_url_configured=%s binance_api_key_configured=%s binance_api_secret_configured=%s api_permissions_verified=%s live_order_capability=disabled",
@@ -733,6 +734,15 @@ if new_login not in s:
     if s.count(old_login) != 1:
         raise RuntimeError(f"Cannot lock sign-in when password is missing: anchor count={s.count(old_login)}")
     s = s.replace(old_login,new_login,1)
+
+# The legacy reference screen asks for username and password; validate both.
+login_auth_old = 'supplied=request.form.get("password", "")\\n        if secrets.compare_digest(supplied, APP_PASSWORD):'
+login_auth_new = 'supplied_username=request.form.get("username", "admin").strip()\\n        supplied=request.form.get("password", "")\\n        if secrets.compare_digest(supplied_username, APP_USERNAME) and secrets.compare_digest(supplied, APP_PASSWORD):'
+if login_auth_new not in s:
+    if s.count(login_auth_old) != 1:
+        raise RuntimeError(f"Cannot apply username authentication: anchor count={s.count(login_auth_old)}")
+    s = s.replace(login_auth_old, login_auth_new, 1)
+s=s.replace('error="Password did not match."', 'error="Username or password did not match."')
 
 status_anchor = '"scheduler_enabled":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")'
 status_new = '"durable_storage":_durable_database_configured(),"storage_warning":(None if _durable_database_configured() else "Persistent PostgreSQL is not connected; mutating operations and automatic scans are blocked to prevent data loss."),"scheduler_requested":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"),"scheduler_enabled":(_durable_database_configured() and os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"))'
