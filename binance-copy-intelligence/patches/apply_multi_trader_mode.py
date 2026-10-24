@@ -736,8 +736,8 @@ if new_login not in s:
     s = s.replace(old_login,new_login,1)
 
 # The legacy reference screen asks for username and password; validate both.
-login_auth_old = 'supplied=request.form.get("password", "")\\n        if secrets.compare_digest(supplied, APP_PASSWORD):'
-login_auth_new = 'supplied_username=request.form.get("username", "admin").strip()\\n        supplied=request.form.get("password", "")\\n        if secrets.compare_digest(supplied_username, APP_USERNAME) and secrets.compare_digest(supplied, APP_PASSWORD):'
+login_auth_old = 'supplied=request.form.get("password", "")\n        if secrets.compare_digest(supplied, APP_PASSWORD):'
+login_auth_new = 'supplied_username=request.form.get("username", "admin").strip()\n        supplied=request.form.get("password", "")\n        if secrets.compare_digest(supplied_username, APP_USERNAME) and secrets.compare_digest(supplied, APP_PASSWORD):'
 if login_auth_new not in s:
     if s.count(login_auth_old) != 1:
         raise RuntimeError(f"Cannot apply username authentication: anchor count={s.count(login_auth_old)}")
