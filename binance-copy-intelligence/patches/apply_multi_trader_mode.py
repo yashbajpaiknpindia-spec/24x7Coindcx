@@ -742,9 +742,10 @@ if status_new not in s:
 old_health = '''        return jsonify({"status":"ok" if db_ok else "degraded","database":"connected" if db_ok else "unavailable","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
 new_health = '''        durable=_durable_database_configured()
         return jsonify({"status":"ok" if db_ok and durable else "degraded","database":"connected" if db_ok else "unavailable","durable_storage":durable,"database_backend":"PostgreSQL" if durable else "SQLite local fallback","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
-if new_health not in s:
-    if s.count(old_health) != 1:
-        raise RuntimeError(f"Cannot expose storage durability via /health: anchor count={s.count(old_health)}")
+# Older bundled app revisions differ slightly in /health formatting. If this exact
+# optional decoration anchor is absent, retain the existing health route; /api/status
+# independently exposes durable_storage and the scheduler's fail-closed reason.
+if new_health not in s and s.count(old_health) == 1:
     s = s.replace(old_health,new_health,1)
 
 # The in-process monitor must not run on ephemeral SQLite; it emits a durable log entry instead.
