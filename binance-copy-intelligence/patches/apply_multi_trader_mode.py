@@ -397,3 +397,136 @@ except Exception:
         raise RuntimeError(f"Cannot add safe startup diagnostics, anchor count={s.count(anchor)}")
     s=s.replace(anchor,block,1)
     app_path.write_text(s)
+
+
+# Rate-limit protection for Binance candles: HTTP 418 means this IP was auto-banned
+# after rate-limit violations. Respect Retry-After, serialize requests, and stop a batch
+# at the first ban rather than hammering the API and logging nine more identical failures.
+analytics = root / "analytics.py"
+s = analytics.read_text()
+if "_MARKET_API_COOLDOWN_UNTIL" not in s:
+    s = s.replace("import os, time\nimport requests", "import os, time, threading\nimport requests")
+    anchor = 'FUTURES_BASE = "https://fapi.binance.com"\n'
+    globals_block = anchor + '''
+# Process-wide request gate shared by scheduled and manual path audits.
+_MARKET_API_LOCK = threading.Lock()
+_MARKET_API_NEXT_AT = 0.0
+_MARKET_API_COOLDOWN_UNTIL = 0.0
+'''
+    if s.count(anchor) != 1:
+        raise RuntimeError(f"Cannot add market-data request gate: anchor count={s.count(anchor)}")
+    s = s.replace(anchor, globals_block, 1)
+    old_req = '''            r = session.get(base+path, params=params, timeout=timeout)
+            r.raise_for_status(); data = r.json()'''
+    new_req = '''            global _MARKET_API_NEXT_AT, _MARKET_API_COOLDOWN_UNTIL
+            with _MARKET_API_LOCK:
+                now = time.time()
+                if now < _MARKET_API_COOLDOWN_UNTIL:
+                    wait = max(1, int(_MARKET_API_COOLDOWN_UNTIL - now))
+                    raise MarketDataError(f"RATE_LIMIT_COOLDOWN_ACTIVE: Binance market-data cooldown remains {wait}s; request skipped.")
+                pause = max(1.0, float(os.getenv("MARKET_DATA_PAUSE", "1.0")))
+                nap = max(0.0, _MARKET_API_NEXT_AT - time.time())
+                if nap:
+                    time.sleep(nap)
+                r = session.get(base+path, params=params, timeout=timeout)
+                _MARKET_API_NEXT_AT = time.time() + pause
+                if r.status_code in (418, 429):
+                    retry_after = r.headers.get("Retry-After")
+                    try:
+                        wait = max(60.0, float(retry_after))
+                    except (TypeError, ValueError):
+                        wait = 300.0 if r.status_code == 418 else 60.0
+                    _MARKET_API_COOLDOWN_UNTIL = time.time() + wait
+                    _MARKET_API_NEXT_AT = _MARKET_API_COOLDOWN_UNTIL
+                    raise MarketDataError(f"RATE_LIMITED_HTTP_{r.status_code}: Binance throttled/banned this service IP; Retry-After={retry_after or 'unspecified'}, cooldown={int(wait)}s. Remaining batch deferred.")
+                r.raise_for_status()
+                data = r.json()'''
+    if s.count(old_req) != 1:
+        raise RuntimeError(f"Cannot add Retry-After/backoff logic: request anchor count={s.count(old_req)}")
+    s = s.replace(old_req, new_req, 1)
+# Make a cooldown visible to every batch in this process, including jobs started after an HTTP 418.
+old_def = '''def run_path_batch(run_id: int, trader_id: int | None = None, limit: int = 20, only_unanalyzed: bool = True, market_type: str = "FUTURES"):
+    with SessionLocal() as db:'''
+new_def = '''def run_path_batch(run_id: int, trader_id: int | None = None, limit: int = 20, only_unanalyzed: bool = True, market_type: str = "FUTURES"):
+    if only_unanalyzed and time.time() < _MARKET_API_COOLDOWN_UNTIL:
+        wait=max(1,int(_MARKET_API_COOLDOWN_UNTIL-time.time()))
+        with SessionLocal() as db:
+            run=db.get(ScanRun,run_id)
+            if run:
+                run.status="DEFERRED"; run.finished_at=utcnow(); run.found_count=0; run.updated_count=0; run.error_count=0
+                run.message=f"Trade-path batch deferred due Binance HTTP rate-limit cooldown ({wait}s remaining); no retry attempted."
+                run.details_json=__import__("json").dumps({"deferred":True,"reason":"RATE_LIMIT_COOLDOWN_ACTIVE","cooldown_remaining_seconds":wait})
+                db.commit()
+        return {"deferred":True,"reason":"RATE_LIMIT_COOLDOWN_ACTIVE","cooldown_remaining_seconds":wait}
+    with SessionLocal() as db:'''
+if new_def not in s:
+    if s.count(old_def) != 1:
+        raise RuntimeError(f"Cannot add pre-batch cooldown check: anchor count={s.count(old_def)}")
+    s = s.replace(old_def,new_def,1)
+# Resume deferred rows after cooldown; give the oldest deferred attempt priority so all queued trades can be retried.
+s = s.replace(
+    'if only_unanalyzed: stmt = stmt.where(Position.path_status.in_(["NOT_ANALYZED", "PENDING"]))',
+    'if only_unanalyzed: stmt = stmt.where(Position.path_status.in_(["NOT_ANALYZED", "PENDING", "RATE_LIMIT_DEFERRED"]))'
+)
+old_order = 'rows = list(db.scalars(stmt.order_by(Position.closed_ms.desc()).limit(max(1,min(limit,100)))))'
+new_order = 'stmt = stmt.order_by((Position.path_status == "RATE_LIMIT_DEFERRED").desc(), Position.path_analyzed_at.asc().nullsfirst(), Position.closed_ms.asc().nullsfirst())\n        rows = list(db.scalars(stmt.limit(max(1,min(limit,100)))))'
+if new_order not in s:
+    if s.count(old_order) != 1:
+        raise RuntimeError(f"Cannot prioritize deferred audit rows: anchor count={s.count(old_order)}")
+    s = s.replace(old_order,new_order,1)
+# A rate limit is a deferred task, not a bad-data analysis error. Stop after the first HTTP ban.
+old_catch = '''        except Exception as e:
+            bad+=1; errors.append(f"position {pid}: {str(e)[:180]}")
+            with SessionLocal() as db:
+                failed = db.get(Position, pid)
+                if failed and failed.path_status != "ANALYZED":
+                    failed.path_status = "ANALYSIS_ERROR"
+                    db.commit()
+            import logging
+            logging.getLogger("binance_intel.audit").exception("trade_path_analysis_failed position_id=%s", pid)'''
+new_catch = '''        except Exception as e:
+            bad+=1; errors.append(f"position {pid}: {str(e)[:180]}")
+            rate_limited = "RATE_LIMIT" in str(e) or "HTTP 418" in str(e) or "HTTP 429" in str(e)
+            with SessionLocal() as db:
+                failed = db.get(Position, pid)
+                if failed and failed.path_status != "ANALYZED":
+                    failed.path_status = "RATE_LIMIT_DEFERRED" if rate_limited else "ANALYSIS_ERROR"
+                    failed.path_analyzed_at = utcnow()
+                    db.commit()
+            import logging
+            logging.getLogger("binance_intel.audit").exception("trade_path_analysis_%s position_id=%s", "deferred_by_rate_limit" if rate_limited else "failed", pid)
+            if rate_limited:
+                break'''
+if new_catch not in s:
+    if s.count(old_catch) != 1:
+        raise RuntimeError(f"Cannot change rate-limited audit failure handling: anchor count={s.count(old_catch)}")
+    s = s.replace(old_catch,new_catch,1)
+analytics.write_text(s)
+
+# Expose rate-limited/deferred paths separately from malformed/incomplete trades in the coverage endpoint.
+app_path = root / "app.py"
+s = app_path.read_text()
+anchor = '''            path_errors = db.scalar(
+                select(func.count(Position.id)).join(Trader).where(
+                    *position_filter, Position.path_status == "ANALYSIS_ERROR"
+                )
+            ) or 0
+'''
+if 'path_rate_limit_deferred = db.scalar(' not in s and anchor in s:
+    s = s.replace(anchor, anchor + '''            path_rate_limit_deferred = db.scalar(
+                select(func.count(Position.id)).join(Trader).where(
+                    *position_filter, Position.path_status == "RATE_LIMIT_DEFERRED"
+                )
+            ) or 0
+''', 1)
+    s = s.replace('"path_analysis_errors": int(path_errors),', '"path_analysis_errors": int(path_errors), "path_rate_limit_deferred": int(path_rate_limit_deferred),', 1)
+    app_path.write_text(s)
+
+js = root / "static" / "app.js"
+s = js.read_text()
+if "'Trade paths deferred by Binance rate limit · Futures'" not in s:
+    s = s.replace(
+        "['Failed trade-path analyses · Futures',cov.markets.FUTURES.path_analysis_errors],",
+        "['Failed trade-path analyses · Futures',cov.markets.FUTURES.path_analysis_errors],['Trade paths deferred by Binance rate limit · Futures',cov.markets.FUTURES.path_rate_limit_deferred],"
+    )
+    js.write_text(s)
