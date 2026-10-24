@@ -8,6 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && cat /tmp/bundle/part* | base64 -d | tar -xJ -C /app \
     && python /tmp/patches/apply_runtime_fixes.py \
+    && python /tmp/patches/apply_multi_trader_mode.py \
     && rm -rf /tmp/bundle /tmp/patches \
     && pip install --no-cache-dir -r /app/requirements.txt
 EXPOSE 10000
