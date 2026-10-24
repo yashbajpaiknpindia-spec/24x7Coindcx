@@ -21,7 +21,7 @@ jobs:
           mkdir -p archive/legacy-coindcx-terminal
           while IFS= read -r -d '' file; do
             case "$file" in
-              binance-copy-intelligence/*|archive/*|.github/*|.gitignore)
+              binance-copy-intelligence/*|archive/*|.github/*|.gitignore|Dockerfile)
                 continue
                 ;;
             esac
