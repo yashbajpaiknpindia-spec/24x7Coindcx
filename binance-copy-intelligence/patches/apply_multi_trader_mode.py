@@ -733,16 +733,12 @@ if new_login not in s:
         raise RuntimeError(f"Cannot lock sign-in when password is missing: anchor count={s.count(old_login)}")
     s = s.replace(old_login,new_login,1)
 
-old_status = '''    return jsonify({"futures_traders":futures_count,"spot_traders":spot_count,"positions":pos_count,"futures_positions":fut_pos,"paths_analyzed":path_count,"watchlisted":watched_count,"last_discovery":_run_dict(last_discovery) if last_discovery else None,"recent_runs":[_run_dict(r) for r in latest],"database_backend":db_backend,"spot_source_note":"Spot collector is auto-probed against undocumented website routes; if no route validates, the run shows an error instead of claiming Spot data was collected.","scheduler_enabled":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")}), 200'''
-new_status = '''    scheduler_requested=os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")
-    durable=_durable_database_configured()
-    storage_warning=None if durable else "Persistent PostgreSQL is not connected; mutating operations and automatic scans are blocked to prevent data loss."
-    return jsonify({"futures_traders":futures_count,"spot_traders":spot_count,"positions":pos_count,"futures_positions":fut_pos,"paths_analyzed":path_count,"watchlisted":watched_count,"last_discovery":_run_dict(last_discovery) if last_discovery else None,"recent_runs":[_run_dict(r) for r in latest],"database_backend":db_backend,"durable_storage":durable,"storage_warning":storage_warning,"scheduler_requested":scheduler_requested,"spot_source_note":"Spot collector is auto-probed against undocumented website routes; if no route validates, the run shows an error instead of claiming Spot data was collected.","scheduler_enabled":scheduler_requested and durable}), 200'''
-if new_status not in s:
-    if s.count(old_status) != 1:
-        raise RuntimeError(f"Cannot show persistence/scheduler readiness: status anchor count={s.count(old_status)}")
-    s = s.replace(old_status,new_status,1)
-
+status_anchor = '"scheduler_enabled":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")'
+status_new = '"durable_storage":_durable_database_configured(),"storage_warning":(None if _durable_database_configured() else "Persistent PostgreSQL is not connected; mutating operations and automatic scans are blocked to prevent data loss."),"scheduler_requested":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"),"scheduler_enabled":(_durable_database_configured() and os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"))'
+if status_new not in s:
+    if s.count(status_anchor) != 1:
+        raise RuntimeError(f"Cannot show persistence/scheduler readiness: anchor count={s.count(status_anchor)}")
+    s = s.replace(status_anchor,status_new,1)
 old_health = '''        return jsonify({"status":"ok" if db_ok else "degraded","database":"connected" if db_ok else "unavailable","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
 new_health = '''        durable=_durable_database_configured()
         return jsonify({"status":"ok" if db_ok and durable else "degraded","database":"connected" if db_ok else "unavailable","durable_storage":durable,"database_backend":"PostgreSQL" if durable else "SQLite local fallback","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
