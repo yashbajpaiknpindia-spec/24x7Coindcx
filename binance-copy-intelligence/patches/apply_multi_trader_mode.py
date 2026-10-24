@@ -200,3 +200,176 @@ s=s.replace("state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();
 s=s.replace("state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();},30000)", "state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view===\'multi-trader\')loadMultiTrader(false);},30000)")
 js.write_text(s)
 print("Multi-Trader Mode installed")
+
+
+# Rebrand the sign-in screen to match the reference layout while keeping the new Binance app identity.
+login = root / "templates" / "login.html"
+login.write_text(r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Binance Copy Intelligence</title>
+<style>
+:root{color-scheme:dark;--bg:#080d14;--panel:#111a25;--muted:#91a0b4;--line:#273546;--green:#62e4b3;--blue:#7cb8ff;--text:#edf3fa}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 15% 10%,#162a39 0,transparent 45%),linear-gradient(135deg,#080d14,#0b111a 55%,#0c1720);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.shell{min-height:100vh;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(360px,.8fr);max-width:1440px;margin:auto;padding:42px;gap:44px;align-items:stretch}
+.hero{display:flex;flex-direction:column;position:relative;overflow:hidden;border:1px solid #273847;border-radius:28px;padding:36px;background:linear-gradient(145deg,rgba(22,40,54,.92),rgba(10,19,29,.76));min-height:680px}
+.brand{display:flex;align-items:center;gap:12px;font-weight:800;letter-spacing:.09em;font-size:14px}.mark{display:grid;place-items:center;width:44px;height:44px;border-radius:14px;background:linear-gradient(145deg,#70f0c2,#72b9ff);color:#06111a;font-size:15px;font-weight:900;letter-spacing:-.04em;box-shadow:0 0 28px #62e4b328}.brand small{display:block;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.19em;margin-top:3px}
+.hero-copy{position:relative;z-index:1;margin-top:95px;max-width:670px}.eyebrow{font-size:11px;font-weight:800;letter-spacing:.2em;color:var(--green)}h1{font-size:clamp(39px,4.5vw,66px);line-height:1.05;letter-spacing:-.055em;margin:18px 0 20px;font-weight:800}h1 em{font-style:normal;color:var(--green)}.hero-copy p{font-size:16px;line-height:1.75;color:#b8c6d5;max-width:560px}
+.chart{width:110%;height:200px;margin:48px -5% 0;opacity:.9}.chart path{fill:none;stroke:var(--green);stroke-width:2.4;filter:drop-shadow(0 0 7px #62e4b330)}.chart .grid{stroke:#2e4553;stroke-width:1;opacity:.55;filter:none}
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:auto;padding-top:22px}.badge{border:1px solid #314655;background:#0c1721a8;padding:9px 12px;border-radius:999px;color:#c2d2df;font-size:12px}.badge b{color:var(--green);margin-right:7px}
+.form-side{display:flex;align-items:center;justify-content:center}.card{width:min(100%,440px);padding:36px;border:1px solid var(--line);border-radius:26px;background:rgba(15,23,34,.94);box-shadow:0 25px 80px #0005}.mobile-brand{display:none}.card .eyebrow{color:var(--blue)}h2{font-size:29px;letter-spacing:-.04em;margin:12px 0 10px}.sub{color:var(--muted);line-height:1.65;margin:0 0 28px;font-size:14px}label{display:block;color:#c8d4e0;font-size:12px;font-weight:700;margin:0 0 9px}input{width:100%;border:1px solid #324355;border-radius:12px;background:#09111a;color:#eef5fb;padding:15px 14px;font-size:15px;outline:none}input:focus{border-color:#74bbff;box-shadow:0 0 0 3px #74bbff18}.primary{border:0;width:100%;border-radius:12px;margin-top:15px;padding:15px 18px;font-weight:800;color:#07131c;background:linear-gradient(90deg,#63e5b5,#82c9ff);font-size:14px;cursor:pointer}.primary:hover{filter:brightness(1.06)}.error{border:1px solid #723d50;background:#331e2b;color:#ffb6c7;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px}.security{display:flex;gap:10px;align-items:flex-start;color:var(--muted);font-size:12px;line-height:1.6;margin-top:24px;padding-top:18px;border-top:1px solid #263341}.dot{flex:0 0 8px;width:8px;height:8px;border-radius:50%;background:var(--green);margin-top:5px;box-shadow:0 0 12px #62e4b355}.footer{color:#617387;text-align:center;font-size:11px;margin-top:22px;line-height:1.7}
+@media(max-width:850px){.shell{grid-template-columns:1fr;padding:16px;gap:18px}.hero{min-height:unset;padding:24px;border-radius:22px}.hero-copy{margin-top:44px}h1{font-size:40px}.chart{height:110px;margin-top:14px}.badges{margin-top:14px}.form-side{padding:8px 0 22px}.card{padding:27px;border-radius:22px}.mobile-brand{display:flex;margin-bottom:26px}.hero-copy p{font-size:14px}}
+@media(max-width:420px){.shell{padding:10px}.hero{padding:20px}.card{padding:23px}.hero-copy{margin-top:35px}h1{font-size:34px}.chart{height:85px}}
+</style></head>
+<body><main class="shell">
+<section class="hero">
+<div class="brand"><span class="mark">BI</span><span>BINANCE COPY<small>INTELLIGENCE WORKSPACE</small></span></div>
+<div class="hero-copy"><div class="eyebrow">PORTFOLIO RESEARCH & RISK AUDIT</div><h1>Measure the edge.<br><em>Respect the risk.</em></h1><p>Monitor copy-trading portfolios, audit accessible trade histories, compare drawdowns across periods, and evaluate risk-controlled multi-trader paper strategies.</p></div>
+<svg class="chart" viewBox="0 0 700 200" preserveAspectRatio="none" aria-hidden="true"><path class="grid" d="M0 30H700M0 80H700M0 130H700M0 180H700"/><path d="M0 157 C46 153 38 125 83 138 S134 144 168 113 S211 137 252 104 S298 127 335 91 S389 110 425 71 S473 103 513 49 S565 81 599 44 S658 57 700 20"/></svg>
+<div class="badges"><span class="badge"><b>✓</b>Read-only research</span><span class="badge"><b>✓</b>Historical trade audit</span><span class="badge"><b>✓</b>Paper-only selection</span></div>
+</section>
+<section class="form-side"><div class="card">
+<div class="mobile-brand brand"><span class="mark">BI</span><span>BINANCE COPY<small>INTELLIGENCE WORKSPACE</small></span></div>
+<div class="eyebrow">PRIVATE WORKSPACE</div><h2>Welcome back</h2><p class="sub">Sign in to your copy-trader analysis console.</p>
+{% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+<form method="post"><label for="password">Workspace password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required autofocus><button class="primary" type="submit">Unlock workspace →</button></form>
+<div class="security"><span class="dot"></span><span><b style="color:#dce8f2">Analysis-only access.</b> This app does not submit orders, withdraw funds, or change your Binance account. API key values are never displayed in this interface.</span></div>
+<div class="footer">Binance Copy Intelligence · Research evidence first<br>Missing source history is reported, never invented.</div>
+</div></section>
+</main></body></html>""")
+
+# Emit structured audit logs to Render stdout/stderr as well as persisting run results in PostgreSQL.
+app_path = root / "app.py"
+s = app_path.read_text()
+if "logging.basicConfig(level=logging.INFO" not in s:
+    s = s.replace(
+        "import csv, io, json, os, threading, secrets, time",
+        "import csv, io, json, os, threading, secrets, time, logging", 1)
+    s = s.replace(
+        "app = Flask(__name__)",
+        "logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')\napp = Flask(__name__)", 1)
+if "async_job_failed run_id=" not in s:
+    old = '''        except Exception as exc:
+            with SessionLocal() as db:
+                r=db.get(ScanRun,jid)
+                if r: r.status="FAILED"; r.finished_at=utcnow(); r.error_count=(r.error_count or 0)+1; r.message=str(exc)[:2000]; db.commit()
+'''
+    new = '''        except Exception as exc:
+            app.logger.exception("async_job_failed run_id=%s job=%s", jid, getattr(target, "__name__", str(target)))
+            with SessionLocal() as db:
+                r=db.get(ScanRun,jid)
+                if r: r.status="FAILED"; r.finished_at=utcnow(); r.error_count=(r.error_count or 0)+1; r.message=str(exc)[:2000]; db.commit()
+'''
+    if s.count(old) != 1:
+        raise RuntimeError(f"Cannot instrument asynchronous job failures, anchor count={s.count(old)}")
+    s = s.replace(old,new,1)
+
+start = s.index("def _run_scheduled_task(kind, market_type, target, args):")
+end = s.index("\ndef _monitor_loop():", start)
+scheduled = '''def _run_scheduled_task(kind, market_type, target, args):
+    with SessionLocal() as db:
+        r=ScanRun(kind=kind,market_type=market_type,status="RUNNING",started_at=utcnow(),message="Scheduled monitor task")
+        db.add(r);db.commit();db.refresh(r);rid=r.id
+    app.logger.info("scheduled_task_started run_id=%s kind=%s market=%s target=%s", rid, kind, market_type, getattr(target, "__name__", str(target)))
+    try:
+        target(rid,*args)
+    except Exception as exc:
+        app.logger.exception("scheduled_task_crashed run_id=%s kind=%s market=%s", rid, kind, market_type)
+        with SessionLocal() as db:
+            r=db.get(ScanRun,rid)
+            if r:
+                r.status="FAILED"; r.finished_at=utcnow(); r.error_count=(r.error_count or 0)+1
+                r.message=f"Scheduled task crashed: {str(exc)[:1600]}"
+                db.commit()
+        raise
+    with SessionLocal() as db:
+        r=db.get(ScanRun,rid)
+        if r:
+            if r.status in ("FAILED","PARTIAL") or (r.error_count or 0)>0:
+                app.logger.error("scheduled_task_completed_with_errors run_id=%s kind=%s market=%s status=%s found=%s updated=%s errors=%s message=%s details=%s",
+                    rid,kind,market_type,r.status,r.found_count,r.updated_count,r.error_count,r.message,(r.details_json or "")[:1200])
+            else:
+                app.logger.info("scheduled_task_completed run_id=%s kind=%s market=%s status=%s found=%s updated=%s message=%s",
+                    rid,kind,market_type,r.status,r.found_count,r.updated_count,r.message)
+    return rid
+'''
+s = s[:start] + scheduled + s[end:]
+if 'app.logger.exception("monitor_cycle_failed")' not in s:
+    old = '''        except Exception as e:
+            try:
+                with SessionLocal() as db:
+                    r=ScanRun(kind="SCHEDULER",market_type="ALL",status="FAILED",started_at=utcnow(),finished_at=utcnow(),error_count=1,message=str(e)[:2000])
+                    db.add(r);db.commit()
+            except Exception: pass
+'''
+    new = '''        except Exception as e:
+            app.logger.exception("monitor_cycle_failed")
+            try:
+                with SessionLocal() as db:
+                    r=ScanRun(kind="SCHEDULER",market_type="ALL",status="FAILED",started_at=utcnow(),finished_at=utcnow(),error_count=1,message=str(e)[:2000])
+                    db.add(r);db.commit()
+            except Exception:
+                app.logger.exception("monitor_cycle_error_could_not_be_persisted")
+'''
+    if s.count(old) != 1:
+        raise RuntimeError(f"Cannot instrument monitor cycle failure, anchor count={s.count(old)}")
+    s = s.replace(old,new,1)
+app_path.write_text(s)
+
+# Persist failed position-path attempts so one repeatedly failing recent trade cannot starve older audit rows.
+analytics = root / "analytics.py"
+s = analytics.read_text()
+s = s.replace(
+    'if only_unanalyzed: stmt = stmt.where(Position.path_status != "ANALYZED")',
+    'if only_unanalyzed: stmt = stmt.where(Position.path_status.in_(["NOT_ANALYZED", "PENDING"]))'
+)
+old = '        except Exception as e: bad+=1; errors.append(f"position {pid}: {str(e)[:180]}")'
+new = '''        except Exception as e:
+            bad+=1; errors.append(f"position {pid}: {str(e)[:180]}")
+            with SessionLocal() as db:
+                failed = db.get(Position, pid)
+                if failed and failed.path_status != "ANALYZED":
+                    failed.path_status = "ANALYSIS_ERROR"
+                    db.commit()
+            import logging
+            logging.getLogger("binance_intel.audit").exception("trade_path_analysis_failed position_id=%s", pid)'''
+if new not in s:
+    if s.count(old) != 1:
+        raise RuntimeError(f"Cannot persist failed trade-path attempt, anchor count={s.count(old)}")
+    s = s.replace(old,new,1)
+analytics.write_text(s)
+
+# Surface failed path analyses as a separate coverage count.
+app_path = root / "app.py"
+s = app_path.read_text()
+if 'path_errors = db.scalar(' not in s and '@app.get("/api/coverage")' in s:
+    anchor = '''            path_analyzed = db.scalar(
+                select(func.count(Position.id)).join(Trader).where(
+                    *position_filter, Position.path_status == "ANALYZED"
+                )
+            ) or 0
+'''
+    addition = anchor + '''            path_errors = db.scalar(
+                select(func.count(Position.id)).join(Trader).where(
+                    *position_filter, Position.path_status == "ANALYSIS_ERROR"
+                )
+            ) or 0
+'''
+    if s.count(anchor) != 1:
+        raise RuntimeError(f"Cannot add path error coverage, anchor count={s.count(anchor)}")
+    s = s.replace(anchor,addition,1)
+    s = s.replace(
+        '"paths_analyzed": int(path_analyzed),',
+        '"paths_analyzed": int(path_analyzed), "path_analysis_errors": int(path_errors),', 1)
+    s = s.replace(
+        'Position.path_status != "ANALYZED",\n                    Position.path_status != "UNPAIRED_SPOT_ACTIVITY",\n                    Position.opened_ms.is_not(None),',
+        'Position.path_status.in_(["NOT_ANALYZED", "PENDING"]),\n                    Position.opened_ms.is_not(None),', 1)
+    app_path.write_text(s)
+
+js = root / "static" / "app.js"
+s = js.read_text()
+if "'Failed trade-path analyses · Futures'" not in s:
+    s = s.replace(
+        "['Trades missing path timestamps/entry · Futures',cov.markets.FUTURES.path_missing_required_timestamps_or_entry],",
+        "['Trades missing path timestamps/entry · Futures',cov.markets.FUTURES.path_missing_required_timestamps_or_entry],['Failed trade-path analyses · Futures',cov.markets.FUTURES.path_analysis_errors],"
+    )
+    js.write_text(s)
