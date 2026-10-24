@@ -197,5 +197,6 @@ $("#mt-evaluate").addEventListener("click",()=>loadMultiTrader(true));$("#mt-ref
 patch(js, 'async function loadSystem(){', code + '\nasync function loadSystem(){', "client controls")
 s=js.read_text()
 s=s.replace("state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view==='traders')loadTraders();if(state.view==='history')loadPaths();},8000)", "state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view==='multi-trader')loadMultiTrader(false);if(state.view==='traders')loadTraders();if(state.view==='history')loadPaths();},30000)")
+s=s.replace("state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();},30000)", "state.refreshTimer=setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view===\'multi-trader\')loadMultiTrader(false);},30000)")
 js.write_text(s)
 print("Multi-Trader Mode installed")
