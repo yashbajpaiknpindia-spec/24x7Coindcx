@@ -663,3 +663,135 @@ if "'Trade paths deferred by Binance rate limit · Futures'" not in s:
         "['Failed trade-path analyses · Futures',cov.markets.FUTURES.path_analysis_errors],['Trade paths deferred by Binance rate limit · Futures',cov.markets.FUTURES.path_rate_limit_deferred],"
     )
     js.write_text(s)
+
+
+# Fail closed on persistence: do not claim automatic scanning/history retention while the
+# service is actually writing to per-instance SQLite. The UI remains readable and explains
+# which Render configuration is missing; all writes/scans resume automatically with Postgres.
+app_path = root / "app.py"
+s = app_path.read_text()
+if "def _durable_database_configured():" not in s:
+    anchor = 'app = Flask(__name__)\n'
+    helper = '''app = Flask(__name__)
+
+def _durable_database_configured():
+    url = os.getenv("DATABASE_URL", "").strip()
+    return url.startswith(("postgres://", "postgresql://", "postgresql+"))
+
+'''
+    if s.count(anchor) != 1:
+        raise RuntimeError(f"Cannot add persistence readiness check: anchor count={s.count(anchor)}")
+    s = s.replace(anchor,helper,1)
+
+old_gate = '''@app.before_request
+def access_gate():
+    if not APP_PASSWORD:
+        return None
+    if request.endpoint in ("login", "health", "static"):
+        return None
+    if session.get("authenticated"):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error":"Authentication required"}), 401
+    return redirect(url_for("login", next=request.path))
+'''
+new_gate = '''@app.before_request
+def access_gate():
+    if request.endpoint in ("login", "logout", "health", "static"):
+        return None
+    if not APP_PASSWORD:
+        message = "APP_PASSWORD is not configured. Set a strong workspace password in the Render Environment before using the application."
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message, "error_code": "APP_PASSWORD_NOT_CONFIGURED"}), 503
+        return render_template("login.html", error=message), 503
+    if not _durable_database_configured() and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        message = "Persistent PostgreSQL is not connected. This action is blocked so scans and audit records are not written to ephemeral per-instance SQLite. Link DATABASE_URL to this app's PostgreSQL database in Render, then redeploy."
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message, "error_code": "DURABLE_DATABASE_REQUIRED", "database_backend": "SQLite local fallback"}), 503
+        return Response(message, status=503, mimetype="text/plain")
+    if session.get("authenticated"):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error":"Authentication required"}), 401
+    return redirect(url_for("login", next=request.path))
+'''
+if new_gate not in s:
+    if s.count(old_gate) != 1:
+        raise RuntimeError(f"Cannot make login/storage access gates fail-closed: anchor count={s.count(old_gate)}")
+    s = s.replace(old_gate,new_gate,1)
+
+old_login = '''def login():
+    error=None
+    if request.method=="POST":'''
+new_login = '''def login():
+    if not APP_PASSWORD:
+        return render_template("login.html", error="Sign-in is locked until APP_PASSWORD is set in the Render Environment."), 503
+    error=None
+    if request.method=="POST":'''
+if new_login not in s:
+    if s.count(old_login) != 1:
+        raise RuntimeError(f"Cannot lock sign-in when password is missing: anchor count={s.count(old_login)}")
+    s = s.replace(old_login,new_login,1)
+
+old_status = '''    return jsonify({"futures_traders":futures_count,"spot_traders":spot_count,"positions":pos_count,"futures_positions":fut_pos,"paths_analyzed":path_count,"watchlisted":watched_count,"last_discovery":_run_dict(last_discovery) if last_discovery else None,"recent_runs":[_run_dict(r) for r in latest],"database_backend":db_backend,"spot_source_note":"Spot collector is auto-probed against undocumented website routes; if no route validates, the run shows an error instead of claiming Spot data was collected.","scheduler_enabled":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")}), 200'''
+new_status = '''    scheduler_requested=os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes")
+    durable=_durable_database_configured()
+    storage_warning=None if durable else "Persistent PostgreSQL is not connected; mutating operations and automatic scans are blocked to prevent data loss."
+    return jsonify({"futures_traders":futures_count,"spot_traders":spot_count,"positions":pos_count,"futures_positions":fut_pos,"paths_analyzed":path_count,"watchlisted":watched_count,"last_discovery":_run_dict(last_discovery) if last_discovery else None,"recent_runs":[_run_dict(r) for r in latest],"database_backend":db_backend,"durable_storage":durable,"storage_warning":storage_warning,"scheduler_requested":scheduler_requested,"spot_source_note":"Spot collector is auto-probed against undocumented website routes; if no route validates, the run shows an error instead of claiming Spot data was collected.","scheduler_enabled":scheduler_requested and durable}), 200'''
+if new_status not in s:
+    if s.count(old_status) != 1:
+        raise RuntimeError(f"Cannot show persistence/scheduler readiness: status anchor count={s.count(old_status)}")
+    s = s.replace(old_status,new_status,1)
+
+old_health = '''        return jsonify({"status":"ok" if db_ok else "degraded","database":"connected" if db_ok else "unavailable","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
+new_health = '''        durable=_durable_database_configured()
+        return jsonify({"status":"ok" if db_ok and durable else "degraded","database":"connected" if db_ok else "unavailable","durable_storage":durable,"database_backend":"PostgreSQL" if durable else "SQLite local fallback","app":"Binance Copy Trader Intelligence","analysis_only":True,"time_utc":utcnow().isoformat()+"Z"}), 200 if db_ok else 503'''
+if new_health not in s:
+    if s.count(old_health) != 1:
+        raise RuntimeError(f"Cannot expose storage durability via /health: anchor count={s.count(old_health)}")
+    s = s.replace(old_health,new_health,1)
+
+# The in-process monitor must not run on ephemeral SQLite; it emits a durable log entry instead.
+old_monitor = '''def _monitor_loop():
+    # This loop runs only while the web instance is awake. Render free instances sleep,
+    # so reliable 24/7 monitoring requires a non-sleeping service and persistent database.
+    interval=max(15,int(os.getenv("MONITOR_INTERVAL_MINUTES","30")))*60'''
+new_monitor = '''def _monitor_loop():
+    # This loop runs only while the web instance is awake. Render free instances sleep,
+    # so reliable 24/7 monitoring requires a non-sleeping service and persistent database.
+    if not _durable_database_configured():
+        app.logger.error("scheduler_blocked reason=DATABASE_URL_NOT_POSTGRES; automatic scans are paused to avoid losing data in local SQLite")
+        try:
+            with SessionLocal() as db:
+                r=ScanRun(kind="SCHEDULER",market_type="ALL",status="BLOCKED",started_at=utcnow(),finished_at=utcnow(),error_count=1,
+                    message="Automatic scans paused: DATABASE_URL is not configured for persistent PostgreSQL. Link this app to a dedicated Postgres database in Render; no scan batch was started.")
+                db.add(r); db.commit()
+        except Exception:
+            app.logger.exception("could_not_persist_scheduler_block_reason")
+        return
+    interval=max(15,int(os.getenv("MONITOR_INTERVAL_MINUTES","30")))*60'''
+if new_monitor not in s:
+    if s.count(old_monitor) != 1:
+        raise RuntimeError(f"Cannot require durable DB before automatic scans: anchor count={s.count(old_monitor)}")
+    s = s.replace(old_monitor,new_monitor,1)
+
+# Report APP_PASSWORD presence only; never emit password/API-key values.
+s=s.replace(
+    'api_permissions_verified=%s live_order_capability=disabled",',
+    'api_permissions_verified=%s app_password_configured=%s scheduler_requested=%s live_order_capability=disabled",'
+)
+s=s.replace(
+    'bool(os.getenv("BINANCE_API_KEY")), bool(os.getenv("BINANCE_API_SECRET")), False)',
+    'bool(os.getenv("BINANCE_API_KEY")), bool(os.getenv("BINANCE_API_SECRET")), False, bool(APP_PASSWORD), os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"))'
+)
+app_path.write_text(s)
+
+# Make the readiness gate self-documenting for deployment setup.
+env_example = root / ".env.example"
+if env_example.exists():
+    e = env_example.read_text()
+    if "APP_PASSWORD=" not in e:
+        e = e.replace("# Optional Binance API credentials.", "# Required login secret for the private dashboard (use a strong unique value).\nAPP_PASSWORD=\n\n# Optional Binance API credentials.")
+    if "DATABASE_URL=\\n" not in e:
+        e += "\n# Required for persistent data; automatic scans are paused until PostgreSQL is connected.\nDATABASE_URL=\n"
+    env_example.write_text(e)
