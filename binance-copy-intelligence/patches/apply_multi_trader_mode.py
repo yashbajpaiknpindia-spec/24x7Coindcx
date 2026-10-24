@@ -373,3 +373,27 @@ if "'Failed trade-path analyses · Futures'" not in s:
         "['Trades missing path timestamps/entry · Futures',cov.markets.FUTURES.path_missing_required_timestamps_or_entry],['Failed trade-path analyses · Futures',cov.markets.FUTURES.path_analysis_errors],"
     )
     js.write_text(s)
+
+
+# Log backend/key readiness without ever emitting secrets, and verify database connectivity at boot.
+app_path = root / "app.py"
+s = app_path.read_text()
+marker = 'app.logger.info("startup_config database_backend='
+if marker not in s:
+    anchor = 'app = Flask(__name__)\n'
+    block = '''app = Flask(__name__)
+_startup_database_url = os.getenv("DATABASE_URL", "").strip()
+_startup_db_backend = "PostgreSQL" if _startup_database_url.startswith(("postgres://", "postgresql://", "postgresql+")) else "SQLite local fallback"
+app.logger.info("startup_config database_backend=%s database_url_configured=%s binance_api_key_configured=%s binance_api_secret_configured=%s api_permissions_verified=%s live_order_capability=disabled",
+    _startup_db_backend, bool(_startup_database_url), bool(os.getenv("BINANCE_API_KEY")), bool(os.getenv("BINANCE_API_SECRET")), False)
+try:
+    with SessionLocal() as _startup_db:
+        _startup_db.execute(select(func.count(Trader.id))).scalar_one()
+    app.logger.info("startup_database_probe status=connected backend=%s", _startup_db_backend)
+except Exception:
+    app.logger.exception("startup_database_probe status=failed backend=%s", _startup_db_backend)
+'''
+    if s.count(anchor) != 1:
+        raise RuntimeError(f"Cannot add safe startup diagnostics, anchor count={s.count(anchor)}")
+    s=s.replace(anchor,block,1)
+    app_path.write_text(s)
