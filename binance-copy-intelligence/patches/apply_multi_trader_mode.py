@@ -382,6 +382,7 @@ marker = 'app.logger.info("startup_config database_backend='
 if marker not in s:
     anchor = 'app = Flask(__name__)\n'
     block = '''app = Flask(__name__)
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 _startup_database_url = os.getenv("DATABASE_URL", "").strip()
 _startup_db_backend = "PostgreSQL" if _startup_database_url.startswith(("postgres://", "postgresql://", "postgresql+")) else "SQLite local fallback"
 app.logger.info("startup_config database_backend=%s database_url_configured=%s binance_api_key_configured=%s binance_api_secret_configured=%s api_permissions_verified=%s live_order_capability=disabled",
