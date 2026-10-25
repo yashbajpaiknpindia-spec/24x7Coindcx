@@ -1187,3 +1187,572 @@ for line in js.splitlines():
         line = line.replace(",'Path analysis',$('#btn-paths')));", ",'Path analysis',$('#btn-paths-2')));")
     lines.append(line)
 js_path.write_text("\n".join(lines) + "\n")
+
+
+# --- deep trader details, dated trade ledger, and honest paper status ---
+# The public Futures lead detail endpoint includes lastTradeTime and portfolio status.
+# Probe Spot listing and open-position endpoints once; never manufacture missing positions.
+collector_path = root / "collector.py"
+collector_src = collector_path.read_text()
+if "def run_trader_detail_batch(" not in collector_src:
+    collector_src += r'''
+
+def run_trader_detail_batch(run_id: int, limit: int = 20):
+    import json, logging, time, requests
+    from datetime import datetime
+    from sqlalchemy import text
+    from models import SessionLocal, ScanRun, utcnow
+    log = logging.getLogger("binance_intel.lead_detail")
+    limit = max(1, min(int(limit), 40))
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "clienttype": "web",
+        "Origin": "https://www.binance.com",
+        "Referer": "https://www.binance.com/en/copy-trading/futures",
+    }
+    endpoint = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail"
+    with SessionLocal() as db:
+        candidates = db.execute(text("""
+            SELECT id, portfolio_id, raw_json
+            FROM traders
+            WHERE market_type='FUTURES' AND portfolio_id IS NOT NULL AND portfolio_id<>''
+              AND (lead_detail_synced_at IS NULL OR lead_detail_synced_at < CURRENT_TIMESTAMP - INTERVAL '24 hours')
+            ORDER BY lead_detail_synced_at ASC NULLS FIRST, id ASC
+            LIMIT :lim
+        """), {"lim": limit}).mappings().all()
+    good = errors = last_time_updates = 0
+    notes = []
+    started = time.monotonic()
+    _update_scan_progress(run_id, f"Lead-profile detail sync starting · {len(candidates)} profiles queued.", {
+        "phase":"TRADER_DETAIL_SYNC","profiles_total":len(candidates),"profiles_completed":0,"progress_pct":0,
+        "current_action":"Loading last-trade time, portfolio status, margin and visibility flags"
+    }, 0, 0, 0)
+    for index, item in enumerate(candidates, start=1):
+        pid = str(item["portfolio_id"])
+        profile_id = int(item["id"])
+        try:
+            response = requests.get(endpoint, params={"portfolioId":pid}, headers=headers, timeout=(4, 10))
+            if response.status_code in (418, 429):
+                wait_header = response.headers.get("Retry-After", "")
+                message = f"Binance HTTP {response.status_code}; profile-detail batch stopped to respect rate limits (Retry-After={wait_header or 'not supplied'})."
+                with SessionLocal() as db:
+                    run = db.get(ScanRun, run_id)
+                    if run:
+                        run.status="DEFERRED"; run.finished_at=utcnow(); run.message=message
+                        run.error_count=errors; run.found_count=good; run.updated_count=last_time_updates
+                        run.details_json=json.dumps({"phase":"RATE_LIMITED","progress_pct":min(99,int((index-1)*100/max(1,len(candidates)))),
+                            "profiles_total":len(candidates),"profiles_completed":index-1,"source_errors":errors,
+                            "last_trade_times_updated":last_time_updates,"current_action":"Binance rate-limit cooldown"})
+                        db.commit()
+                log.error("lead_detail_rate_limited status=%s profile_id=%s", response.status_code, profile_id)
+                return
+            response.raise_for_status()
+            body = response.json()
+            data = body.get("data") if isinstance(body, dict) else None
+            if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                data = data["data"]
+            if not isinstance(data, dict) or not data or body.get("success") is False:
+                raise ValueError("Detail endpoint returned no recognized profile object: " + json.dumps(body)[:240])
+            last_time = None
+            for key in ("lastTradeTime", "lastTradeTimeMs", "last_trade_time", "lastTradeTimestamp"):
+                value = data.get(key)
+                if value not in (None, "", 0, "0"):
+                    try:
+                        last_time = int(float(value))
+                        if last_time < 10_000_000_000:
+                            last_time *= 1000
+                        break
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+            status = data.get("status")
+            checked_at = utcnow()
+            with SessionLocal() as db:
+                oldrow = db.execute(text("SELECT raw_json, last_trade_ms, portfolio_status FROM traders WHERE id=:id"), {"id":profile_id}).mappings().first()
+                if not oldrow:
+                    continue
+                try:
+                    raw = json.loads(oldrow["raw_json"] or "{}")
+                except Exception:
+                    raw = {}
+                if not isinstance(raw, dict):
+                    raw = {"source_record":raw}
+                raw["_lead_detail"] = data
+                raw["_lead_detail_checked_at_utc"] = checked_at.isoformat() + "Z"
+                raw["_lead_detail_source"] = "Binance public lead-portfolio/detail"
+                new_last = last_time if last_time is not None else oldrow["last_trade_ms"]
+                new_status = str(status)[:80] if status not in (None, "") else oldrow["portfolio_status"]
+                db.execute(text("""
+                    UPDATE traders SET raw_json=:raw, last_trade_ms=:last_time, portfolio_status=:status,
+                    lead_detail_synced_at=:checked WHERE id=:id
+                """), {"raw":json.dumps(raw, ensure_ascii=False), "last_time":new_last, "status":new_status,
+                      "checked":checked_at, "id":profile_id})
+                db.commit()
+            good += 1
+            last_time_updates += int(last_time is not None)
+            if data.get("positionShow") is False:
+                notes.append(f"{pid}: public detail says positionShow=false")
+        except Exception as exc:
+            errors += 1
+            notes.append(f"{pid}: {str(exc)[:180]}")
+            log.warning("lead_detail_request_failed trader_id=%s portfolio_id=%s error=%s", profile_id, pid, str(exc)[:220])
+        elapsed = int(time.monotonic()-started)
+        _update_scan_progress(run_id, f"Lead-profile detail sync {index}/{len(candidates)} · {good} profiles updated · {last_time_updates} last-trade timestamps found · {errors} errors.", {
+            "phase":"TRADER_DETAIL_SYNC","profile_index":index,"profiles_total":len(candidates),
+            "profiles_completed":index,"progress_pct":min(99,int(index*100/max(1,len(candidates)))),
+            "profiles_updated":good,"last_trade_times_updated":last_time_updates,"source_errors":errors,
+            "elapsed_seconds":elapsed,"current_action":f"Fetched portfolio detail {index}/{len(candidates)}"
+        }, good, last_time_updates, errors)
+        time.sleep(max(0.5, float(os.getenv("BINANCE_DETAIL_PAUSE", "1.0"))))
+    with SessionLocal() as db:
+        run = db.get(ScanRun, run_id)
+        if run:
+            run.status = "COMPLETED" if not errors else ("PARTIAL" if good else "FAILED")
+            run.finished_at = utcnow(); run.found_count = good; run.updated_count = last_time_updates; run.error_count = errors
+            run.message = f"Lead detail sync: {good}/{len(candidates)} profiles updated; {last_time_updates} last-trade timestamps found; {errors} errors."
+            run.details_json = json.dumps({"phase":"COMPLETED" if not errors else "PARTIAL","progress_pct":100 if not errors else min(99,int(good*100/max(1,len(candidates)))),
+                "profiles_total":len(candidates),"profiles_updated":good,"last_trade_times_updated":last_time_updates,
+                "source_errors":errors,"elapsed_seconds":int(time.monotonic()-started),"notes":notes[:50],
+                "current_action":"Lead profile detail sync complete"})
+            db.commit()
+
+
+def run_public_feed_probe(run_id: int, _unused: int = 0):
+    import json, logging, requests
+    from sqlalchemy import text
+    from models import SessionLocal, ScanRun, utcnow
+    log = logging.getLogger("binance_intel.public_feed_probe")
+    headers = {
+        "User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        "Accept":"application/json, text/plain, */*","Content-Type":"application/json",
+        "clienttype":"web","Origin":"https://www.binance.com","Referer":"https://www.binance.com/en-IN/copy-trading/spot",
+    }
+    list_body = {"pageNumber":1,"pageSize":30,"timeRange":"30D","dataType":"ROI","favoriteOnly":False,
+                 "hideFull":True,"nickname":"","order":"DESC","userAsset":0,"portfolioType":"PUBLIC"}
+    spot_candidates = [
+        "/bapi/spot/v1/friendly/spot/copy-trade/home-page/query-list",
+        "/bapi/spot/v1/friendly/spot/copy-trade/home-page/list",
+        "/bapi/spot/v1/friendly/spot/copy-trade/lead-portfolio/list",
+    ]
+    spot_result = {"verified":False,"endpoint":None,"rows":0,"attempts":[]}
+    for path in spot_candidates:
+        try:
+            response = requests.post("https://www.binance.com"+path, json=list_body, headers=headers, timeout=(3,6))
+            note = {"path":path,"status_code":response.status_code}
+            try: payload = response.json()
+            except Exception: payload = {}
+            data = payload.get("data") if isinstance(payload,dict) else None
+            rows = []
+            if isinstance(data,dict):
+                for key in ("list","rows","portfolioList","leadPortfolioList","items"):
+                    if isinstance(data.get(key),list):
+                        rows = data[key]; break
+            elif isinstance(data,list):
+                rows = data
+            if response.ok and rows and isinstance(rows[0],dict) and any(k in rows[0] for k in ("leadPortfolioId","portfolioId","portfolio_id")):
+                note["recognized_list_payload"] = True
+                spot_result = {"verified":True,"endpoint":path,"rows":len(rows),"attempts":spot_result["attempts"]+[note]}
+                os.environ["BINANCE_SPOT_LIST_ENDPOINT"] = path
+                os.environ["ENABLE_SPOT_MONITOR"] = "true"
+                log.info("spot_public_listing_endpoint_verified endpoint=%s rows=%s; spot monitor enabled for this process",path,len(rows))
+                break
+            note["code"] = payload.get("code") if isinstance(payload,dict) else None
+            note["message"] = str((payload or {}).get("message",""))[:180] if isinstance(payload,dict) else ""
+            note["payload_keys"] = list(payload.keys())[:15] if isinstance(payload,dict) else []
+            spot_result["attempts"].append(note)
+        except Exception as exc:
+            spot_result["attempts"].append({"path":path,"error":str(exc)[:180]})
+    # Public Futures position-history is closed-trade history. Probe a small set of public
+    # current-position route candidates once; a response is only accepted if it contains rows.
+    open_result = {"verified":False,"endpoint":None,"rows":0,"attempts":[]}
+    try:
+        with SessionLocal() as db:
+            row = db.execute(text("SELECT portfolio_id FROM traders WHERE market_type='FUTURES' AND portfolio_id IS NOT NULL AND portfolio_id<>'' ORDER BY id LIMIT 1")).first()
+        portfolio_id = str(row[0]) if row else None
+    except Exception:
+        portfolio_id = None
+    if portfolio_id:
+        candidates = [
+            ("/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions","POST"),
+            ("/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/positions","POST"),
+            ("/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-list","POST"),
+            ("/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/current-position","POST"),
+            ("/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/open-positions","POST"),
+        ]
+        body = {"portfolioId":portfolio_id,"pageNumber":1,"pageSize":20}
+        for path, method in candidates:
+            try:
+                response = requests.post("https://www.binance.com"+path,json=body,headers=headers,timeout=(3,5))
+                note = {"path":path,"method":method,"status_code":response.status_code}
+                try: payload = response.json()
+                except Exception: payload = {}
+                data = payload.get("data") if isinstance(payload,dict) else None
+                rows = []
+                if isinstance(data,dict):
+                    for key in ("list","rows","positions","positionList","items"):
+                        if isinstance(data.get(key),list):
+                            rows=data[key]; break
+                elif isinstance(data,list):
+                    rows=data
+                if response.ok and rows and isinstance(rows[0],dict):
+                    note["recognized_position_rows"]=len(rows)
+                    open_result={"verified":True,"endpoint":path,"rows":len(rows),"attempts":open_result["attempts"]+[note]}
+                    log.info("public_lead_open_positions_endpoint_verified endpoint=%s rows=%s",path,len(rows))
+                    break
+                note["code"] = payload.get("code") if isinstance(payload,dict) else None
+                note["message"] = str((payload or {}).get("message",""))[:150] if isinstance(payload,dict) else ""
+                open_result["attempts"].append(note)
+            except Exception as exc:
+                open_result["attempts"].append({"path":path,"error":str(exc)[:150]})
+    report = {"spot_listing":spot_result,"futures_open_positions":open_result,
+              "verified_at_utc":utcnow().isoformat()+"Z",
+              "important":"A successful HTTP status alone is not sufficient; source must return recognized, non-empty profile/position rows."}
+    status = "COMPLETED" if spot_result["verified"] or open_result["verified"] else "BLOCKED"
+    message = ("Public feed probe verified " + ("Spot listing. " if spot_result["verified"] else "") +
+               ("Futures open positions." if open_result["verified"] else "") if status=="COMPLETED" else
+               "No recognized public Spot listing or current Futures lead-position feed was found in the tested endpoints. Futures closed-position history remains usable; open lead positions are not currently observable from these routes.")
+    with SessionLocal() as db:
+        run = db.get(ScanRun,run_id)
+        if run:
+            run.status=status;run.finished_at=utcnow();run.found_count=int(spot_result["rows"])+int(open_result["rows"])
+            run.updated_count=0;run.error_count=0 if status=="COMPLETED" else 1
+            run.message=message;run.details_json=json.dumps(report)
+            db.commit()
+    if status=="BLOCKED":
+        log.warning("public_feed_probe_blocked details=%s",json.dumps(report)[:2200])
+    return report
+'''
+collector_path.write_text(collector_src)
+
+# Add timestamped portfolio-detail sync marker and timestamp columns remain BIGINT.
+app_path = root / "app.py"
+app_src = app_path.read_text()
+if "lead_detail_synced_at TIMESTAMP" not in app_src:
+    marker = "_repair_postgres_timestamp_columns()\n"
+    ensure = '''_repair_postgres_timestamp_columns()
+
+def _ensure_lead_detail_sync_schema():
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as schema_db:
+        schema_db.exec_driver_sql("ALTER TABLE traders ADD COLUMN IF NOT EXISTS lead_detail_synced_at TIMESTAMP NULL")
+    print("database_schema_migration_ok: lead detail sync checkpoint column ready")
+
+_ensure_lead_detail_sync_schema()
+'''
+    if app_src.count(marker) != 1:
+        raise RuntimeError(f"Cannot add lead detail sync schema: anchor count={app_src.count(marker)}")
+    app_src = app_src.replace(marker,ensure,1)
+
+# Schedule a bounded profile-detail batch. History batches cover discovered profiles over subsequent cycles.
+if 'run_trader_detail_batch' not in app_src:
+    lines = app_src.splitlines()
+    out = []
+    in_monitor = False
+    inserted = False
+    for line in lines:
+        if line.startswith("def _monitor_loop():"):
+            in_monitor = True
+        if in_monitor and 'run_history_batch' in line and '"FUTURES"' in line and '_run_scheduled_task' in line and not inserted:
+            out.append(line)
+            out.append('                _run_scheduled_task("TRADER_DETAIL_SYNC","FUTURES",run_trader_detail_batch,(max(1,min(int(os.getenv("SCHEDULED_DETAIL_BATCH","20")),40)),))')
+            inserted = True
+            continue
+        out.append(line)
+        if in_monitor and line.startswith("def ") and line != "def _monitor_loop():":
+            in_monitor = False
+    if not inserted:
+        # Fallback: attach detail sync to the Futures discovery completion path inside the monitor loop.
+        app_src = "\n".join(lines) + "\n"
+        start = app_src.index("def _monitor_loop():")
+        pos = app_src.find("while True:",start)
+        if pos < 0:
+            raise RuntimeError("Cannot schedule profile-detail sync: monitor loop anchor missing")
+        newline = app_src.find("\n",pos)
+        app_src = app_src[:newline+1] + '            _run_scheduled_task("TRADER_DETAIL_SYNC","FUTURES",run_trader_detail_batch,(max(1,min(int(os.getenv("SCHEDULED_DETAIL_BATCH","20")),40)),))\n' + app_src[newline+1:]
+    else:
+        app_src = "\n".join(out) + "\n"
+
+# Probe whether Spot listings and a current public Futures position feed are actually available.
+if 'PUBLIC_FEED_PROBE' not in app_src:
+    monitor_start = app_src.index("def _monitor_loop():")
+    while_pos = app_src.find("while True:", monitor_start)
+    if while_pos < 0:
+        raise RuntimeError("Cannot schedule one-time public feed probe: monitor loop anchor missing")
+    newline = app_src.find("\n",while_pos)
+    probe = '''            try:
+                with SessionLocal() as _probe_db:
+                    _probe_done = _probe_db.scalar(select(ScanRun.id).where(ScanRun.kind=="PUBLIC_FEED_PROBE").limit(1))
+                if not _probe_done:
+                    _run_scheduled_task("PUBLIC_FEED_PROBE","ALL",run_public_feed_probe,(0,))
+            except Exception:
+                app.logger.exception("public_feed_probe_schedule_failed")
+'''
+    app_src = app_src[:newline+1] + probe + app_src[newline+1:]
+
+# Restore a verified Spot endpoint from the database across process restarts.
+if "spot_probe_restore_attempted" not in app_src:
+    monitor_start = app_src.index("def _monitor_loop():")
+    while_pos = app_src.find("while True:", monitor_start)
+    restore = '''        try:
+            with SessionLocal() as _restore_db:
+                _probe = _restore_db.scalar(select(ScanRun).where(ScanRun.kind=="PUBLIC_FEED_PROBE").order_by(ScanRun.id.desc()).limit(1))
+            if _probe and _probe.details_json:
+                _probe_data=json.loads(_probe.details_json or "{}")
+                _spot_data=_probe_data.get("spot_listing",{})
+                if _spot_data.get("verified") and _spot_data.get("endpoint"):
+                    os.environ.setdefault("BINANCE_SPOT_LIST_ENDPOINT", _spot_data["endpoint"])
+                    os.environ["ENABLE_SPOT_MONITOR"]="true"
+                    app.logger.info("spot_probe_restore_attempted endpoint=%s",_spot_data["endpoint"])
+        except Exception:
+            app.logger.exception("spot_probe_restore_failed")
+'''
+    newline = app_src.find("\n",monitor_start)
+    # place immediately before the first while loop to avoid rerunning restore every cycle
+    while_pos = app_src.find("while True:",monitor_start)
+    app_src = app_src[:while_pos-8] + restore + app_src[while_pos-8:]
+
+app_path.write_text(app_src)
+
+# Expose lead detail fields via existing trader serializers without changing old response keys.
+app_src = app_path.read_text()
+if "def _trader_dict_with_lead_detail(" not in app_src:
+    wrapper = '''
+_original_trader_dict = _trader_dict
+def _trader_dict_with_lead_detail(t):
+    d = _original_trader_dict(t)
+    d["last_trade_ms"] = getattr(t, "last_trade_ms", None)
+    d["portfolio_status"] = getattr(t, "portfolio_status", None)
+    d["lead_detail_synced_at"] = None
+    if engine.dialect.name == "postgresql":
+        try:
+            from sqlalchemy import text
+            with engine.connect() as detail_conn:
+                v=detail_conn.execute(text("SELECT lead_detail_synced_at FROM traders WHERE id=:id"),{"id":t.id}).scalar()
+                d["lead_detail_synced_at"] = v.isoformat()+"Z" if v else None
+        except Exception:
+            pass
+    try:
+        _raw=json.loads(t.raw_json or "{}")
+        d["lead_detail"] = _raw.get("_lead_detail") if isinstance(_raw,dict) else None
+    except Exception:
+        d["lead_detail"] = None
+    return d
+_trader_dict = _trader_dict_with_lead_detail
+
+'''
+    app_src += "\n" + wrapper
+
+# Dated trade ledger: use source timestamps as supplied; missing close time is NOT labelled as an open position.
+if '@app.get("/api/trade-ledger")' not in app_src:
+    ledger_route = r'''
+
+@app.get("/api/trade-ledger")
+def api_trade_ledger():
+    from sqlalchemy import select, func, or_
+    from datetime import datetime, timezone
+    market = (request.args.get("market_type","FUTURES") or "FUTURES").upper()
+    if market not in ("FUTURES","SPOT","ALL"): market="FUTURES"
+    raw_days=(request.args.get("days","30") or "30").upper()
+    days=None if raw_days in ("ALL","0","LIFETIME") else max(1,min(int(raw_days),3650))
+    limit=max(1,min(int(request.args.get("limit",200)),500))
+    offset=max(0,min(int(request.args.get("offset",0)),100000))
+    since_ms=int((datetime.now(timezone.utc).timestamp()-(days*86400 if days else 0))*1000) if days else None
+    where=[]
+    if market!="ALL": where.append(Trader.market_type==market)
+    date_col=func.coalesce(Position.closed_ms,Position.opened_ms)
+    if since_ms is not None: where.append(date_col>=since_ms)
+    with SessionLocal() as db:
+        stmt=select(Position,Trader).join(Trader,Trader.id==Position.trader_id)
+        count_stmt=select(func.count(Position.id)).join(Trader,Trader.id==Position.trader_id)
+        if where:
+            stmt=stmt.where(*where);count_stmt=count_stmt.where(*where)
+        total=int(db.scalar(count_stmt) or 0)
+        rows=db.execute(stmt.order_by(date_col.desc().nullslast(),Position.id.desc()).limit(limit).offset(offset)).all()
+        pnl_sum=0.0;gross_win=0.0;gross_loss=0.0;wins=losses=0;missing_close=0;durations=[]
+        items=[]
+        def iso_ms(value):
+            return datetime.fromtimestamp(value/1000,timezone.utc).isoformat().replace("+00:00","Z") if value is not None else None
+        for pos,t in rows:
+            pnl=float(pos.close_pnl or 0.0)
+            pnl_sum+=pnl
+            if pnl>0: wins+=1;gross_win+=pnl
+            elif pnl<0: losses+=1;gross_loss+=abs(pnl)
+            if pos.closed_ms is None: missing_close+=1
+            duration=(max(0,pos.closed_ms-pos.opened_ms)/60000) if pos.closed_ms is not None and pos.opened_ms is not None else None
+            if duration is not None: durations.append(duration)
+            items.append({
+                "id":pos.id,"trader_id":t.id,"nickname":t.nickname,"portfolio_id":t.portfolio_id,
+                "profile_url":t.profile_url,"market_type":t.market_type,"symbol":pos.symbol,"side":pos.side,
+                "leverage":pos.leverage,"margin_mode":pos.margin_mode,"size":pos.size,
+                "entry_price":pos.entry_price,"exit_price":pos.exit_price,"close_pnl":pos.close_pnl,"roi_pct":pos.roi_pct,
+                "opened_ms":pos.opened_ms,"closed_ms":pos.closed_ms,"opened_at_utc":iso_ms(pos.opened_ms),
+                "closed_at_utc":iso_ms(pos.closed_ms),"duration_minutes":duration,
+                "state":"CLOSED_HISTORY" if (pos.source_kind or "")=="CLOSED_POSITION_HISTORY" else (pos.path_status or "UNKNOWN"),
+                "time_quality":"CLOSE_TIME_MISSING" if pos.closed_ms is None else "TIMESTAMPS_AVAILABLE",
+                "source_kind":pos.source_kind,"path_status":pos.path_status,"candles_covered":pos.candles_covered,
+                "coverage_pct":pos.coverage_pct,"mae_pct":pos.mae_pct,"mfe_pct":pos.mfe_pct,
+                "time_to_mae_min":pos.time_to_mae_min,"time_to_mfe_min":pos.time_to_mfe_min,
+                "went_adverse_first":pos.went_adverse_first
+            })
+    return jsonify({
+        "market_type":market,"days":raw_days,"since_ms":since_ms,"limit":limit,"offset":offset,"total":total,
+        "returned":len(items),"positions":items,
+        "summary":{"realized_pnl_reported":round(pnl_sum,8),"wins":wins,"losses":losses,
+            "win_rate_pct":round(wins*100/max(1,wins+losses),2),"profit_factor":round(gross_win/gross_loss,4) if gross_loss else (None if gross_win==0 else "infinite"),
+            "missing_close_time_rows":missing_close,"avg_duration_minutes":round(sum(durations)/len(durations),2) if durations else None},
+        "open_positions_available":False,
+        "disclaimer":"This is the stored Binance closed-position-history feed, filtered by opened/closed timestamp. It is not a current open-position feed and it is not the paper portfolio P&L."
+    })
+
+@app.get("/api/feed-diagnostics")
+def api_feed_diagnostics():
+    with SessionLocal() as db:
+        runs=list(db.scalars(select(ScanRun).where(ScanRun.kind.in_(["PUBLIC_FEED_PROBE","TRADER_DETAIL_SYNC"])).order_by(ScanRun.id.desc()).limit(12)))
+        by_market={}
+        for market in ("FUTURES","SPOT"):
+            profile_count=int(db.scalar(select(func.count(Trader.id)).where(Trader.market_type==market)) or 0)
+            synced_count=int(db.scalar(select(func.count(Trader.id)).where(Trader.market_type==market,Trader.history_synced_at.is_not(None))) or 0)
+            position_count=int(db.scalar(select(func.count(Position.id)).join(Trader).where(Trader.market_type==market)) or 0)
+            by_market[market]={"profiles":profile_count,"profiles_history_synced":synced_count,"stored_position_rows":position_count}
+        out=[]
+        for r in runs:
+            try: details=json.loads(r.details_json or "{}")
+            except Exception: details={}
+            out.append({"id":r.id,"kind":r.kind,"market_type":r.market_type,"status":r.status,"started_at":_iso(r.started_at),
+                        "finished_at":_iso(r.finished_at),"message":r.message,"details":details})
+    return jsonify({"markets":by_market,"checks":out,"scheduler_requested":os.getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","yes"),
+                    "spot_monitor_enabled":os.getenv("ENABLE_SPOT_MONITOR","false").lower() in ("1","true","yes"),
+                    "paper_trading_active":False,
+                    "paper_trading_reason":"This release has shortlist scoring only; no persisted cash/equity/open-paper-position ledger or verified public lead open-position feed."})
+
+'''
+    app_src += ledger_route
+app_path.write_text(app_src)
+
+# Full Trade Ledger page with date-window controls and legible trade timestamps.
+html_path = root / "templates" / "index.html"
+html = html_path.read_text()
+if 'data-view="ledger"' not in html:
+    html = html.replace(
+        '    <button class="nav-link" data-view="multi-trader"><span class="nav-ico">⇄</span> Multi-Trader Mode</button>\n',
+        '    <button class="nav-link" data-view="multi-trader"><span class="nav-ico">⇄</span> Multi-Trader Mode</button>\n    <button class="nav-link" data-view="ledger"><span class="nav-ico">◷</span> Full Trade Ledger</button>\n',1)
+if 'id="view-ledger"' not in html:
+    ledger_page = r'''    <section class="view" id="view-ledger">
+      <div class="section-heading"><div><div class="eyebrow">SOURCE TRADE HISTORY</div><h2>Full Trade Ledger</h2><p>Inspect the exact reported open/close timestamps of stored historical position rows, with date-window filters. These are source-reported trades—not simulated account positions.</p></div><span class="tag blue">READ-ONLY · HISTORICAL</span></div>
+      <div class="filter-bar ledger-filters">
+        <label>Market<select id="ledger-market"><option value="FUTURES" selected>Futures</option><option value="SPOT">Spot</option><option value="ALL">All markets</option></select></label>
+        <label>Time window<select id="ledger-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="180">Last 180 days</option><option value="365">Last 365 days</option><option value="ALL">All stored history</option></select></label>
+        <button class="primary-button" id="ledger-refresh">Refresh ledger</button>
+      </div>
+      <div class="kpi-grid">
+        <article class="kpi-card"><div class="kpi-head"><span>Historical rows in window</span></div><div class="kpi-value" id="ledger-count">—</div><div class="kpi-foot">From stored source history only</div></article>
+        <article class="kpi-card"><div class="kpi-head"><span>Reported realized PnL</span></div><div class="kpi-value" id="ledger-pnl">—</div><div class="kpi-foot">Sum of source-reported closed PnL</div></article>
+        <article class="kpi-card"><div class="kpi-head"><span>Win rate</span></div><div class="kpi-value" id="ledger-winrate">—</div><div class="kpi-foot">Among rows with positive/negative reported PnL</div></article>
+        <article class="kpi-card"><div class="kpi-head"><span>Closing timestamp missing</span></div><div class="kpi-value" id="ledger-missing">—</div><div class="kpi-foot">Not classified as open positions</div></article>
+      </div>
+      <article class="panel">
+        <div class="panel-header"><div><div class="eyebrow">DATA VISIBILITY</div><h3>What this feed can and cannot show</h3></div></div>
+        <div class="notice-box" id="ledger-source-note">Loading source diagnostics…</div>
+        <div class="notice-box" id="ledger-paper-note">Paper-trading is not active in this build: portfolio selection weights are not capital, positions, or returns.</div>
+      </article>
+      <article class="panel table-panel">
+        <div class="panel-header"><div><div class="eyebrow">TIME-STAMPED POSITION HISTORY</div><h3>Reported trades</h3><p id="ledger-meta">Loading…</p></div></div>
+        <div class="table-scroll"><table class="ledger-table"><thead><tr><th>Trader / portfolio</th><th>Symbol / side</th><th>Opened (IST)</th><th>Closed (IST)</th><th>Duration</th><th>Entry</th><th>Exit</th><th>Leverage</th><th>Size</th><th>Reported PnL</th><th>ROI</th><th>Path audit</th></tr></thead><tbody id="ledger-rows"><tr><td colspan="12" class="empty-state">Loading trade history…</td></tr></tbody></table></div>
+      </article>
+    </section>
+'''
+    html = html.replace('    <section class="view" id="view-multi-trader">', ledger_page+'    <section class="view" id="view-multi-trader">',1)
+# Avoid implying the shortlist is a funded or running paper portfolio.
+html = html.replace("Selected paper portfolios","Selected shortlist · illustrative weights only")
+html = html.replace("PAPER ONLY · NO ORDERS","SCREEN ONLY · NO ORDERS")
+html = html.replace(
+    '<div id="mt-note" class="notice-box">Only profiles already discovered or added to the database can be evaluated. Run profile discovery first if this is empty.</div>',
+    '<div id="mt-note" class="notice-box">Only discovered profiles can be evaluated. These selection weights are illustrative; no virtual orders or account balance are created.</div><div id="paper-ledger-status" class="notice-box warning">PAPER PORTFOLIO NOT ACTIVE — this build has no configured cash balance, equity curve, virtual order ledger or open paper positions. The current feature ranks traders and suggests weights only. A public current-position feed must be verified before instant leader-entry mirroring can be simulated.</div>'
+)
+html_path.write_text(html)
+
+# Router, polling and ledger rendering.
+js_path = root / "static" / "app.js"
+js = js_path.read_text()
+js = js.replace("if(name==='multi-trader')loadMultiTrader(false);if(name==='history')loadPaths();",
+                "if(name==='multi-trader')loadMultiTrader(false);if(name==='ledger')loadLedger();if(name==='history')loadPaths();")
+js = js.replace("traders:'Trader universe','multi-trader':'Multi-Trader Mode',history:",
+                "traders:'Trader universe','multi-trader':'Multi-Trader Mode',ledger:'Full Trade Ledger',history:")
+js = js.replace("setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view==='multi-trader')loadMultiTrader(false);},30000)",
+                "setInterval(()=>{refreshStatus();loadRunsOnly();if(state.view==='multi-trader')loadMultiTrader(false);if(state.view==='ledger')loadLedger();},30000)")
+if "async function loadLedger()" not in js:
+    js += r'''
+function ledgerFmtTime(ms){if(ms===null||ms===undefined||ms==="")return '<span class="na">Timestamp unavailable</span>';return esc(new Date(Number(ms)).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}));}
+function ledgerFmtDuration(m){if(m===null||m===undefined||!Number.isFinite(Number(m)))return '—';m=Number(m);if(m<60)return Math.round(m)+'m';if(m<1440)return (m/60).toFixed(1)+'h';return (m/1440).toFixed(1)+'d';}
+async function loadLedger(){
+  const body=$('#ledger-rows');if(!body)return;
+  body.innerHTML='<tr><td colspan="12" class="empty-state">Loading timestamped source records…</td></tr>';
+  $('#ledger-refresh').disabled=true;
+  try{
+    const market=$('#ledger-market').value;const days=$('#ledger-days').value;
+    const d=await api('/api/trade-ledger?market_type='+encodeURIComponent(market)+'&days='+encodeURIComponent(days)+'&limit=500&offset=0');
+    const summary=d.summary||{};
+    $('#ledger-count').textContent=Number(d.total||0).toLocaleString('en-IN');
+    $('#ledger-pnl').textContent=summary.realized_pnl_reported===null?'N/A':Number(summary.realized_pnl_reported||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+    $('#ledger-winrate').textContent=summary.win_rate_pct===null||summary.win_rate_pct===undefined?'N/A':Number(summary.win_rate_pct).toFixed(1)+'%';
+    $('#ledger-missing').textContent=Number(summary.missing_close_time_rows||0).toLocaleString('en-IN');
+    $('#ledger-meta').textContent='Showing '+Number(d.returned||0).toLocaleString('en-IN')+' of '+Number(d.total||0).toLocaleString('en-IN')+' rows · source timestamps shown in Asia/Kolkata · window '+days;
+    body.innerHTML=(d.positions||[]).map(p=>{
+      const pnl=Number(p.close_pnl||0);const pc=pnl>0?'positive':pnl<0?'negative':'';
+      return '<tr><td><strong>'+esc(p.nickname||'Unknown')+'</strong><small>'+esc(p.portfolio_id||'')+'</small><small>'+esc(p.market_type||'')+' · '+esc(p.time_quality||'')+'</small></td>'+
+      '<td><strong>'+esc(p.symbol||'—')+'</strong><small>'+esc(p.side||'—')+'</small></td>'+
+      '<td>'+ledgerFmtTime(p.opened_ms)+'</td><td>'+ledgerFmtTime(p.closed_ms)+'</td><td>'+ledgerFmtDuration(p.duration_minutes)+'</td>'+
+      '<td>'+n(p.entry_price,6)+'</td><td>'+n(p.exit_price,6)+'</td><td>'+n(p.leverage,1,'x')+'</td><td>'+n(p.size,4)+'</td>'+
+      '<td class="'+pc+'">'+n(p.close_pnl,2)+'</td><td class="'+colorNum(p.roi_pct)+'">'+n(p.roi_pct,3,'%')+'</td>'+
+      '<td><strong>'+esc(p.path_status||'Not audited')+'</strong><small>Coverage '+n(p.coverage_pct,1,'%')+' · MAE '+n(p.mae_pct,2,'%')+' · MFE '+n(p.mfe_pct,2,'%')+'</small></td></tr>';
+    }).join('')||'<tr><td colspan="12" class="empty-state">No source position rows exist for this market/window. Spot currently has no discovered profiles or trade history.</td></tr>';
+    const diag=await api('/api/feed-diagnostics');
+    const f=diag.markets||{};const spot=f.SPOT||{};const futures=f.FUTURES||{};
+    const checks=diag.checks||[];const probe=checks.find(x=>x.kind==='PUBLIC_FEED_PROBE');
+    const spotState=spot.profiles>0?'Spot profiles: '+spot.profiles+', history-synced: '+spot.profiles_history_synced+', stored rows: '+spot.stored_position_rows:
+      (probe?'Spot listing probe: '+(probe.status||'UNKNOWN')+' — '+(probe.message||'No detail'):'Spot listing source has not been verified yet.');
+    const futState='Futures: '+(futures.profiles||0)+' profiles, '+(futures.profiles_history_synced||0)+' history-synced, '+(futures.stored_position_rows||0)+' stored position rows.';
+    $('#ledger-source-note').textContent=spotState+' '+futState+' Detail sync fills last-trade timestamps when Binance returns them. Closed-position history does not prove current open positions.';
+    $('#ledger-paper-note').textContent=diag.paper_trading_active?'Paper portfolio engine reports active; inspect its independent ledger before trusting PnL.':'PAPER PORTFOLIO NOT ACTIVE: no cash/equity or virtual open-position ledger is maintained. Multi-Trader Mode weights are recommendations only, not entered trades.';
+  }catch(e){body.innerHTML='<tr><td colspan="12" class="empty-state">'+esc(e.message)+'</td></tr>';}
+  finally{$('#ledger-refresh').disabled=false;}
+}
+$('#ledger-refresh')?.addEventListener('click',loadLedger);
+$('#ledger-market')?.addEventListener('change',loadLedger);
+$('#ledger-days')?.addEventListener('change',loadLedger);
+'''
+js_path.write_text(js)
+
+# Increase visual hierarchy, text size and table readability throughout the app.
+css_path = root / "static" / "app.css"
+css = css_path.read_text()
+if ".ledger-table{" not in css:
+    css += r"""
+/* Readable research UI and full trade ledger */
+body{font-size:15px}
+p,.muted,.subtle,.kpi-foot,.run-sub,.section-heading p,.field-row label{font-size:14px}
+h1{font-size:30px}h2{font-size:25px!important}h3{font-size:18px!important}
+.kpi-value{font-size:36px!important;line-height:1.12;letter-spacing:-.025em}
+.kpi-head{font-size:13px!important;font-weight:700}
+.panel-header p{font-size:13px;color:#91a0b4}
+.nav-link{font-size:14px!important;padding-top:12px;padding-bottom:12px}
+button,select,input{font-size:14px}
+.table-scroll th{font-size:12px!important;padding:13px 14px!important;letter-spacing:.03em}
+.table-scroll td{font-size:13.5px!important;line-height:1.55;padding:13px 14px!important;vertical-align:top}
+.table-scroll td small{font-size:12px!important;line-height:1.5;display:block;color:#91a0b4;overflow-wrap:anywhere;margin-top:3px}
+.ledger-filters{display:flex;gap:14px;align-items:end;flex-wrap:wrap;margin:12px 0 18px}
+.ledger-filters label{display:flex;flex-direction:column;gap:7px;color:#b5c5d4;font-size:13px;min-width:150px}
+.ledger-filters select{background:#111a25;color:#edf3fa;border:1px solid #304354;border-radius:9px;padding:10px 12px;min-height:42px}
+.ledger-filters .primary-button{min-height:42px;padding:10px 18px}
+.ledger-table{min-width:1500px;border-collapse:separate;border-spacing:0}
+.ledger-table td:nth-child(3),.ledger-table td:nth-child(4){min-width:170px;white-space:nowrap}
+.ledger-table td:nth-child(12){min-width:185px}
+.ledger-table td:first-child{min-width:205px}
+.ledger-table .na{color:#e4af69;font-weight:700}
+.notice-box.warning{border:1px solid #745630;background:#2a2116;color:#f2d4a1;border-radius:12px;padding:16px;font-size:14px;line-height:1.65}
+.view .kpi-grid{gap:14px}
+@media(max-width:760px){.kpi-value{font-size:30px!important}.table-scroll td{font-size:12.5px!important}.ledger-filters label{min-width:125px;flex:1}.ledger-filters .primary-button{width:100%}}
+"""
+    css_path.write_text(css)
