@@ -102,7 +102,7 @@ js_path.write_text(js)
 js = js_path.read_text()
 if "PL_RANK_LEVERAGE_COVERAGE_V2" not in js:
     old_lev_cell = "(t.observed_median_leverage===null?'—':Number(t.observed_median_leverage).toFixed(2)+'×')"
-    new_lev_cell = "(t.observed_median_leverage===null?'Not reported':Number(t.observed_median_leverage).toFixed(2)+'×')+' / '+(t.observed_max_leverage===null||t.observed_max_leverage===undefined?'—':Number(t.observed_max_leverage).toFixed(2)+'×')+'<small style=\\"display:block\\">'+plPct(t.leverage_coverage_pct)+' coverage · '+Number(t.leverage_unknown_trades||0)+' unknown</small>'"
+    new_lev_cell = "(t.observed_median_leverage===null?'Not reported':Number(t.observed_median_leverage).toFixed(2)+'×')+' / '+(t.observed_max_leverage===null||t.observed_max_leverage===undefined?'—':Number(t.observed_max_leverage).toFixed(2)+'×')+' · '+plPct(t.leverage_coverage_pct)+' coverage ('+Number(t.leverage_unknown_trades||0)+' unknown)'"
     if js.count(old_lev_cell) != 1:
         raise RuntimeError(f"Could not extend ranking leverage cell; anchor count={js.count(old_lev_cell)}")
     js = js.replace(old_lev_cell, new_lev_cell, 1)
