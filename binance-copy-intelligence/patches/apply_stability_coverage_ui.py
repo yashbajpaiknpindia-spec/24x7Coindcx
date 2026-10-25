@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import hashlib
 
 root = Path("/app")
 app_path = root / "app.py"
@@ -468,4 +469,20 @@ $("#mt-next-page").addEventListener("click",()=>{if((mtPage+1)*mtPageSize<mtTabl
 js += "\n// STABILITY_COVERAGE_METRICS_V1\n"
 js += "\n$('#pl-profile-prev').addEventListener('click',()=>{if(plProfilePage>0){plProfilePage--;plRenderPortfolios()}});$('#pl-profile-next').addEventListener('click',()=>{if((plProfilePage+1)*plProfilePageSize<pl.portfolios.length){plProfilePage++;plRenderPortfolios()}});$('#pl-market').addEventListener('change',()=>{plProfilePage=0});\n"
 js_path.write_text(js)
-print("Installed stability-first ranking, history/path coverage, source-win-rate fallback and compact paginated tables.")
+
+# Re-cache-bust the FINAL client bundle, after this patch has edited app.js.
+# The earlier build step runs before this script, so doing this last avoids a
+# browser reusing the same hard-coded query version for new JavaScript content.
+html = html_path.read_text()
+version = "bi-" + hashlib.sha256(js.encode("utf-8")).hexdigest()[:12]
+cache_pattern = re.compile(
+    r'(?P<prefix><script\\b[^>]*\\bsrc\\s*=\\s*)(?P<q>["\\'])(?P<src>.*?app\\.js)(?:\\?v=[^"\\']*)?(?P=q)(?P<suffix>[^>]*>)',
+    re.IGNORECASE | re.DOTALL
+)
+cache_matches = list(cache_pattern.finditer(html))
+if len(cache_matches) != 1:
+    raise RuntimeError(f"Expected exactly one app.js script include for final cache bust; found {len(cache_matches)}")
+match = cache_matches[0]
+html = html[:match.start()] + match.group("prefix") + match.group("q") + match.group("src") + "?v=" + version + match.group("q") + match.group("suffix") + html[match.end():]
+html_path.write_text(html)
+print(f"Installed stability-first ranking, history/path coverage, source-win-rate fallback and compact paginated tables. Final JS cache key: {version}")
