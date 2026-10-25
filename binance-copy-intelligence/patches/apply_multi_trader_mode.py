@@ -1161,3 +1161,29 @@ html = html_path.read_text()
 html = html.replace('id="scan-pages" type="number" min="1" max="30" value="2"', 'id="scan-pages" type="number" min="1" max="30" value="1"')
 html = html.replace('id="scan-older" checked', 'id="scan-older"')
 html_path.write_text(html)
+
+
+# --- futures-only automatic monitor guard ---
+# Spot website route probing is still unverified and can make a scheduled cycle wait through
+# multiple endpoint timeouts. Keep automatic cycles focused on Futures unless explicitly opted in.
+app_path = root / "app.py"
+app_src = app_path.read_text()
+for market_line in (
+    '_run_scheduled_task("DISCOVERY","SPOT",run_discovery,(pages,True,"SPOT"))',
+    '_run_scheduled_task("HISTORY_SYNC","SPOT",run_history_batch,(max(1,min(int(os.getenv("SCHEDULED_HISTORY_BATCH","5")),20)),False,"SPOT"))',
+    '_run_scheduled_task("PATH_ANALYSIS","SPOT",run_path_batch,(None,max(1,min(int(os.getenv("SCHEDULED_PATH_BATCH","10")),25)),True,"SPOT"))',
+):
+    guarded = 'if os.getenv("ENABLE_SPOT_MONITOR","false").lower() in ("1","true","yes"): ' + market_line
+    app_src = app_src.replace("                " + market_line, "                " + guarded, 1)
+app_path.write_text(app_src)
+
+# Ensure each path-analysis button controls its own busy state.
+js_path = root / "static" / "app.js"
+js = js_path.read_text()
+js = js.replace(",'Path analysis',$('#btn-paths-2')));", ",'Path analysis',$('#btn-paths')));", 1)
+lines = []
+for line in js.splitlines():
+    if line.startswith("$('#btn-paths-2').addEventListener"):
+        line = line.replace(",'Path analysis',$('#btn-paths')));", ",'Path analysis',$('#btn-paths-2')));")
+    lines.append(line)
+js_path.write_text("\n".join(lines) + "\n")
