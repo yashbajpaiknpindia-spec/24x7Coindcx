@@ -191,6 +191,27 @@ if "PL_FORECAST_LEVERAGE_AND_WINRATE_V2" not in app:
     )
     app_path.write_text(app)
 
+# Return leverage coverage for the selected portfolio details panel, not just forecast rows.
+app = app_path.read_text()
+if "PL_DETAIL_LEVERAGE_COVERAGE_V2" not in app:
+    old_behavior = "behavior={'market_type':t.market_type,'source_platform_win_rate_pct':t.win_rate,'source_roi':t.roi,'source_mdd':t.mdd,'closed_trade_win_rate_pct':"
+    new_behavior = "behavior={'market_type':t.market_type,'source_platform_win_rate_pct':t.win_rate,'source_roi':t.roi,'source_mdd':t.mdd,'leverage_coverage_pct':(100.0 if t.market_type=='SPOT' else (100.0*sum(1 for p in all_rows if p.leverage is not None and float(p.leverage)>0)/len(all_rows) if all_rows else 0.0)),'leverage_unknown_trades':(0 if t.market_type=='SPOT' else sum(1 for p in all_rows if p.leverage is None or float(p.leverage)<=0)),'closed_trade_win_rate_pct':"
+    if old_behavior not in app:
+        raise RuntimeError("Could not patch Portfolio Lab leverage coverage response")
+    app = app.replace(old_behavior, new_behavior, 1)
+    app += "\\n# PL_DETAIL_LEVERAGE_COVERAGE_V2\\n"
+    app_path.write_text(app)
+
+# Add a count of Futures rows where leverage is missing; Spot is unleveraged rather than unknown.
+js = js_path.read_text()
+if "Trades with unknown leverage" not in js:
+    old = "['Leverage data coverage',plPct(b.leverage_coverage_pct)],['Average MAE'"
+    new = "['Leverage data coverage',plPct(b.leverage_coverage_pct)],['Trades with unknown leverage',b.leverage_unknown_trades===undefined?'—':b.leverage_unknown_trades],['Average MAE'"
+    if old not in js:
+        raise RuntimeError("Could not patch unknown-leverage detail statistic")
+    js = js.replace(old, new, 1)
+    js_path.write_text(js)
+
 # Ensure Portfolio Lab fallback URLs use the same official detail URL format as stored profiles.
 app = app_path.read_text()
 app = app.replace(
