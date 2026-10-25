@@ -244,8 +244,8 @@ def pl_portfolios():
         "selected portfolio closed-PnL set")
     app = replace_once(
         app,
-        "'profile_url':t.profile_url or ('https://www.binance.com/en/copy-trading/'+('spot' if t.market_type=='SPOT' else 'futures')+'/lead-details/'+str(t.portfolio_id)),\n            'roi':t.roi,'pnl':t.pnl,'mdd':t.mdd,'win_rate':t.win_rate,'last_seen':t.last_seen.isoformat() if t.last_seen else None,",
-        "'profile_url':t.profile_url or ('https://www.binance.com/en-IN/copy-trading/lead-details/'+str(t.portfolio_id)+'?timeRange=90D' if t.portfolio_id else None),\n            'roi':t.roi,'pnl':t.pnl,'mdd':t.mdd,'win_rate':source_win_rate,'source_win_rate_pct':source_win_rate,'source_win_rate_source':source_win_rate_source,'source_total_positions':t.total_positions,'last_seen':t.last_seen.isoformat() if t.last_seen else None,",
+        "'roi':t.roi,'pnl':t.pnl,'mdd':t.mdd,'win_rate':t.win_rate,'last_seen':t.last_seen.isoformat() if t.last_seen else None,",
+        "'roi':t.roi,'pnl':t.pnl,'mdd':t.mdd,'win_rate':source_win_rate,'source_win_rate_pct':source_win_rate,'source_win_rate_source':source_win_rate_source,'source_total_positions':t.total_positions,'last_seen':t.last_seen.isoformat() if t.last_seen else None,",
         "profile detail win rate/source count")
     cov_start = app.find("        coverage={'stored_positions':len(all_rows),'closed_pnl_records':len(closed),'with_mae_mfe':mae,")
     cov_end = app.find("        snapshot_out=[", cov_start)
