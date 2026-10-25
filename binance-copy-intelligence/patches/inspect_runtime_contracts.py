@@ -209,6 +209,11 @@ if "PL_FORECAST_LEVERAGE_AND_WINRATE_V2" not in app:
         "'extra_copy_cost_bps_of_notional':cost,'horizon_days':horizon,'investment_scenario_note':'The chosen investment is total capital; allocation_pct is the fraction reserved per concurrent position. Source ROI is the reported ROI and is not multiplied by leverage twice.',",
         1
     )
+    old_detail_lev = "'max_observed_leverage':max(lev) if lev else None,"
+    new_detail_lev = "'max_observed_leverage':max(lev) if lev else None,'leverage_coverage_pct':(None if t.market_type=='SPOT' else (100.0*len(lev)/len(all_rows) if all_rows else 0.0)),"
+    if old_detail_lev not in app:
+        raise RuntimeError("Cannot add detail leverage coverage: source anchor mismatch")
+    app = app.replace(old_detail_lev, new_detail_lev, 1)
     app_path.write_text(app)
 
 # Ensure Portfolio Lab fallback URLs use the same official detail URL format as stored profiles.
