@@ -88,6 +88,14 @@ if "STABILITY_COVERAGE_METRICS_V1" not in app:
             if outcome_stability is not None: stability_parts.append((outcome_stability,0.20))
             stability_score=(sum(v*w for v,w in stability_parts)/sum(w for v,w in stability_parts)) if stability_parts else None
             stability_confidence=40.0*(len(mdd_values)/3.0)+40.0*min(1.0,len(path_rows)/10.0)+15.0*min(1.0,len(closed)/20.0)+(5.0 if source_wr is not None else 0.0)
+            if market_type=="SPOT":
+                # Verified Spot source supports 30D/90D/180D/365D, not a verified 7D metric.
+                # Evaluate Spot on 30D fields rather than excluding every Spot profile.
+                reasons=[r for r in reasons if r not in ("MISSING_SOURCE_7D_ROI","MISSING_SOURCE_7D_MDD","RECENT_ROI_BELOW_FLOOR","7D_MDD_LIMIT_EXCEEDED")]
+                if roi30 is None:
+                    reasons.append("MISSING_SOURCE_30D_ROI")
+                elif roi30 < min_roi_7d:
+                    reasons.append("RECENT_30D_ROI_BELOW_FLOOR")
             evidence_gaps=[]
             if source_wr is None: evidence_gaps.append("NO_SOURCE_WIN_RATE_CAPTURED")
             if not closed: evidence_gaps.append("NO_CLOSED_PNL_SAMPLE")
