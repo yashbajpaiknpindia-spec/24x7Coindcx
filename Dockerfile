@@ -23,3 +23,5 @@ RUN apt-get update \
     && pip install --no-cache-dir -r /app/requirements.txt
 EXPOSE 10000
 CMD ["sh", "-c", "gunicorn app:app --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:${PORT:-10000}"]
+
+# Rebuild: update Spot source period handling from apply_live_history_improvements.py.
