@@ -82,6 +82,11 @@ if "PL_FORENSICS_COLUMNS_V2" not in js:
         "margin allocation per trade; ROI is used as reported and is not multiplied by leverage twice. Observed leverage informs notional cost estimates; missing leverage is labelled as incomplete evidence."
     )
     # These are the Portfolio Lab's ten-column table placeholders; two win-rate columns are added.
+    old_leverage_cell = "(t.observed_median_leverage===null?'—':Number(t.observed_median_leverage).toFixed(2)+'×')"
+    new_leverage_cell = "(t.market_type==='SPOT'?'Spot · no leverage':(t.observed_median_leverage===null?'Unknown':Number(t.observed_median_leverage).toFixed(2)+'×'))"
+    if js.count(old_leverage_cell) != 1:
+        raise RuntimeError("Cannot label Portfolio Lab leverage cell: source anchor mismatch")
+    js = js.replace(old_leverage_cell, new_leverage_cell, 1)
     # Keep forecast loading, empty, and error rows aligned with the 12-column ranking table.
     forecast_start = js.find("async function plRunForecast()")
     forecast_end = js.find("function plRenderDailyForecast()", forecast_start)
@@ -99,7 +104,7 @@ if "MT_OFFICIAL_LINK_AND_WR_V2" not in js:
     if old_mt in js:
         js = js.replace(old_mt, new_mt, 1)
     else:
-        print("WARNING: Multi-Trader table row anchor did not match")
+        raise RuntimeError("Cannot patch Multi-Trader row: source anchor mismatch")
     js += "\n// MT_OFFICIAL_LINK_AND_WR_V2\n"
 
 js_path.write_text(js)
@@ -121,6 +126,10 @@ html = html.replace(
     "<th>Portfolio / official Binance page</th><th>Score</th><th>Stored trade win rate</th><th>ROI 7D</th>",
     1
 )
+if "Source win rate</th><th>Closed-trade win rate</th>" not in html:
+    raise RuntimeError("Portfolio Lab win-rate headers did not apply")
+if "Stored trade win rate</th>" not in html:
+    raise RuntimeError("Multi-Trader win-rate header did not apply")
 if "BINANCE_INTEL_DESKTOP_READABILITY_V1" not in html:
     css = '''<style id="BINANCE_INTEL_DESKTOP_READABILITY_V1">
 html{font-size:16px!important}
@@ -169,7 +178,7 @@ if "PL_FORECAST_LEVERAGE_AND_WINRATE_V2" not in app:
     if old_lev in app:
         app = app.replace(old_lev, new_lev, 1)
     else:
-        print("WARNING: Forecast leverage output anchor did not match")
+        raise RuntimeError("Cannot patch forecast leverage fields: source anchor mismatch")
     app = app.replace(
         "'source_roi':t.roi,'source_pnl':t.pnl,'source_mdd':t.mdd,'source_win_rate':t.win_rate,",
         "'source_roi':t.roi,'source_pnl':t.pnl,'source_mdd':t.mdd,'source_win_rate':t.win_rate,'market_type':market,",
