@@ -134,6 +134,19 @@ if "def _spot_response_with_list(" not in src:
     src += normalizer
 collector_path.write_text(src)
 
+# Skip the unsupported 7D Spot mode instead of treating its intentional empty response
+# as proof that the Spot leaderboard contains no profiles.
+discovery_src = collector_path.read_text()
+if "SPOT_SUPPORTED_PERIODS_V1" not in discovery_src:
+    old_modes = 'modes = [(r, t) for r in (("7D", "30D", "90D", "180D", "365D") if include_older else ("7D", "30D", "365D")) for t in ("ROI", "PNL", "SHARP_RATIO", "WIN_RATE", "AUM")]'
+    new_modes = '''# SPOT_SUPPORTED_PERIODS_V1: do not query unsupported 7D Spot periods.
+    periods = ("30D", "90D", "180D", "365D") if market_type == "SPOT" else (("7D", "30D", "90D", "180D", "365D") if include_older else ("7D", "30D", "365D"))
+    modes = [(r, t) for r in periods for t in ("ROI", "PNL", "SHARP_RATIO", "WIN_RATE", "AUM")]'''
+    if discovery_src.count(old_modes) != 1:
+        raise RuntimeError(f"Spot period selection anchor count={discovery_src.count(old_modes)}")
+    collector_path.write_text(discovery_src.replace(old_modes, new_modes, 1))
+
+
 # Prefer recently closed trades for prompt MAE/MFE feedback; older backlog remains eligible.
 analytics_path = root / "analytics.py"
 if analytics_path.exists():
