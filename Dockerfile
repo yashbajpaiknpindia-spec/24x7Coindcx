@@ -21,6 +21,8 @@ RUN apt-get update \
     && python /tmp/patches/apply_position_history_dedupe.py \
     && python /tmp/patches/apply_frontend_cache_bust.py \
     && python /tmp/patches/inspect_runtime_contracts.py \
+    && python -m py_compile /tmp/patches/apply_stability_coverage_ui.py \
+    && python /tmp/patches/apply_stability_coverage_ui.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
     && apt-get autoremove -y \
@@ -30,3 +32,5 @@ EXPOSE 10000
 CMD ["sh", "-c", "gunicorn app:app --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:${PORT:-10000}"]
 
 # Rebuild: update Spot source period handling from apply_live_history_improvements.py.
+
+# Rebuild: compact tables, stability-first risk ranking and explicit per-profile history coverage.
