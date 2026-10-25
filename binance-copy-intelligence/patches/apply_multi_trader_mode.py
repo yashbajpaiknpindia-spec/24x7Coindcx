@@ -1491,31 +1491,28 @@ if 'PUBLIC_FEED_PROBE' not in app_src:
 '''
     app_src = app_src[:newline+1] + probe + app_src[newline+1:]
 
-# Restore a verified Spot endpoint from the database across process restarts.
+# Restore a previously verified Spot endpoint after restarts, using an exact line anchor.
+# Do not splice by character offset near the loop: that can split time.sleep(...) and break boot.
 if "spot_probe_restore_attempted" not in app_src:
-    monitor_start = app_src.index("def _monitor_loop():")
-    while_pos = app_src.find("while True:", monitor_start)
-    restore = '''        try:
-            with SessionLocal() as _restore_db:
-                _probe = _restore_db.scalar(select(ScanRun).where(ScanRun.kind=="PUBLIC_FEED_PROBE").order_by(ScanRun.id.desc()).limit(1))
-            if _probe and _probe.details_json:
-                _probe_data=json.loads(_probe.details_json or "{}")
-                _spot_data=_probe_data.get("spot_listing",{})
-                if _spot_data.get("verified") and _spot_data.get("endpoint"):
-                    os.environ.setdefault("BINANCE_SPOT_LIST_ENDPOINT", _spot_data["endpoint"])
-                    os.environ["ENABLE_SPOT_MONITOR"]="true"
-                    app.logger.info("spot_probe_restore_attempted endpoint=%s",_spot_data["endpoint"])
-        except Exception:
-            app.logger.exception("spot_probe_restore_failed")
+    restore = '''    try:
+        with SessionLocal() as _restore_db:
+            _probe = _restore_db.scalar(select(ScanRun).where(ScanRun.kind=="PUBLIC_FEED_PROBE").order_by(ScanRun.id.desc()).limit(1))
+        if _probe and _probe.details_json:
+            _probe_data=json.loads(_probe.details_json or "{}")
+            _spot_data=_probe_data.get("spot_listing",{})
+            if _spot_data.get("verified") and _spot_data.get("endpoint"):
+                os.environ.setdefault("BINANCE_SPOT_LIST_ENDPOINT", _spot_data["endpoint"])
+                os.environ["ENABLE_SPOT_MONITOR"]="true"
+                app.logger.info("spot_probe_restore_attempted endpoint=%s",_spot_data["endpoint"])
+    except Exception:
+        app.logger.exception("spot_probe_restore_failed")
 '''
-    # Insert at the beginning of the monitor function's while-body boundary without
-    # slicing into the preceding statement (which can corrupt time.sleep(...)).
-    while_pos = app_src.find("while True:", monitor_start)
-    if while_pos < 0:
-        raise RuntimeError("Cannot restore Spot probe settings: monitor loop anchor missing")
-    line_start = app_src.rfind("\n", 0, while_pos) + 1
-    restore = "\n".join(line[4:] if line.startswith("        ") else line for line in restore.splitlines()) + "\n"
-    app_src = app_src[:line_start] + restore + app_src[line_start:]
+    monitor_anchor = '    interval=max(15,int(os.getenv("MONITOR_INTERVAL_MINUTES","30")))*60\n'
+    if app_src.count(monitor_anchor) == 1:
+        app_src = app_src.replace(monitor_anchor, monitor_anchor + restore, 1)
+    else:
+        raise RuntimeError(f"Cannot restore Spot probe safely: interval anchor count={app_src.count(monitor_anchor)}")
+
 
 app_path.write_text(app_src)
 
