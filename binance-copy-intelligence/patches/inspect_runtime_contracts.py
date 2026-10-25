@@ -199,7 +199,7 @@ if "PL_DETAIL_LEVERAGE_COVERAGE_V2" not in app:
     if old_behavior not in app:
         raise RuntimeError("Could not patch Portfolio Lab leverage coverage response")
     app = app.replace(old_behavior, new_behavior, 1)
-    app += "\\n# PL_DETAIL_LEVERAGE_COVERAGE_V2\\n"
+    app += "\n# PL_DETAIL_LEVERAGE_COVERAGE_V2\n"
     app_path.write_text(app)
 
 # Add a count of Futures rows where leverage is missing; Spot is unleveraged rather than unknown.
