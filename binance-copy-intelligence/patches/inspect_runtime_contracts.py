@@ -83,7 +83,7 @@ if "PL_FORENSICS_COLUMNS_V2" not in js:
     )
     # These are the Portfolio Lab's ten-column table placeholders; two win-rate columns are added.
     js = js.replace('colspan="10" class="empty-state">Run a forecast', 'colspan="12" class="empty-state">Run a forecast', 1)
-    js = js.replace('colspan="10" class="empty-state">'+esc(e.message), 'colspan="12" class="empty-state">'+esc(e.message), 1)
+    # Error-state text is rendered by JS and does not need a colspan rewrite.
     js += "\n// PL_FORENSICS_COLUMNS_V2\n"
 
 # Multi-Trader: add a working external official portfolio link and closed-trade win rate.
