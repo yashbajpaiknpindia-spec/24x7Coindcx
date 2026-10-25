@@ -18,8 +18,14 @@ def _pl_daily_outlook_once(market, today):
             ScanRun.started_at >= _pl_dt.combine(today, _pl_dt.min.time()),
             ScanRun.status.in_(["COMPLETED","EMPTY"])
         ).order_by(ScanRun.id.desc()).limit(1))
-        if old:
+        if old and old.status=="COMPLETED":
             return
+        # A previously empty Spot run must be retried after profiles are discovered.
+        if old and old.status=="EMPTY" and market=="SPOT":
+            n_now=db.scalar(select(func.count(Trader.id)).where(
+                Trader.exchange=="BINANCE",Trader.market_type=="SPOT")) or 0
+            if not n_now:
+                return
     now=utcnow()
     try:
         if market=="SPOT":
