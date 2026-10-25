@@ -94,7 +94,7 @@ def api_coverage():
                     if not isinstance(value, dict) or value.get("mdd") is None:
                         missing_mdd[period] += 1
             trader_filter = (Trader.exchange == "BINANCE", Trader.market_type == market)
-            position_filter = (Trader.market_type == market,)
+            position_filter = (Trader.exchange == "BINANCE", Trader.market_type == market,)
             profile_count = len(traders)
             history_pending = sum(
                 1 for t in traders
