@@ -31,7 +31,10 @@ if "STABILITY_COVERAGE_METRICS_V1" not in app:
         '        tids=[t.id for t in traders]; grouped={i:[] for i in tids}\n        if tids:\n            for p in db.scalars(select(Position).where(Position.trader_id.in_(tids),Position.close_pnl.is_not(None)).order_by(Position.closed_ms.desc().nullslast(),Position.id.desc())):\n                grouped.setdefault(p.trader_id,[]).append(p)\n',
         '''        tids=[t.id for t in traders]; grouped={i:[] for i in tids}; path_grouped={i:[] for i in tids}
         if tids:
-            for p in db.scalars(select(Position).where(Position.trader_id.in_(tids),Position.close_pnl.is_not(None)).order_by(Position.closed_ms.desc().nullslast(),Position.id.desc())):
+            closed_query=select(Position).where(Position.trader_id.in_(tids),Position.close_pnl.is_not(None),Position.closed_ms.is_not(None))
+            if market_type=="SPOT":
+                closed_query=closed_query.where(Position.source_kind.in_(("PAIRED_SPOT_TRADE","CLOSED_SPOT_TRADE","VERIFIED_SPOT_CLOSED_TRADE")))
+            for p in db.scalars(closed_query.order_by(Position.closed_ms.desc().nullslast(),Position.id.desc())):
                 grouped.setdefault(p.trader_id,[]).append(p)
             for p in db.scalars(select(Position).where(Position.trader_id.in_(tids)).order_by(Position.closed_ms.desc().nullslast(),Position.id.desc())):
                 path_grouped.setdefault(p.trader_id,[]).append(p)
@@ -54,7 +57,7 @@ if "STABILITY_COVERAGE_METRICS_V1" not in app:
             if source_wr is None:
                 source_wr=_mt_num(source_snapshot_wr.get(t.id))
                 if source_wr is not None: source_wr_source="LATEST_SAVED_SNAPSHOT"
-            path_rows=[p for p in all_positions if p.mae_pct is not None and p.mfe_pct is not None]
+            path_rows=[p for p in all_positions if p.closed_ms is not None and p.mae_pct is not None and p.mfe_pct is not None and (market_type!="SPOT" or str(p.source_kind or "").upper() in ("PAIRED_SPOT_TRADE","CLOSED_SPOT_TRADE","VERIFIED_SPOT_CLOSED_TRADE"))]
             maes=[abs(float(p.mae_pct)) for p in path_rows if p.mae_pct is not None]
             mfes=[abs(float(p.mfe_pct)) for p in path_rows if p.mfe_pct is not None]
             sorted_mae=sorted(maes)
