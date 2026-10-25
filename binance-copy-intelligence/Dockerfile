@@ -16,6 +16,7 @@ RUN apt-get update \
     && python /tmp/patches/apply_portfolio_lab_markup.py \
     && python /tmp/patches/apply_portfolio_lab_ui.py \
     && python /tmp/patches/apply_portfolio_lab_daily_ui.py \
+    && python /tmp/patches/apply_live_history_improvements.py \
     && rm -rf /tmp/bundle /tmp/patches \
     && pip install --no-cache-dir -r /app/requirements.txt
 EXPOSE 10000
