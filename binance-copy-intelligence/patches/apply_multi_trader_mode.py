@@ -796,3 +796,368 @@ if env_example.exists():
     if "DATABASE_URL=\\n" not in e:
         e += "\n# Required for persistent data; automatic scans are paused until PostgreSQL is connected.\nDATABASE_URL=\n"
     env_example.write_text(e)
+
+
+# --- live progress and millisecond timestamp schema patch ---
+# Binance website timestamps are Unix milliseconds, which do not fit PostgreSQL INTEGER.
+models_path = root / "models.py"
+models_src = models_path.read_text()
+models_src = models_src.replace(
+    "from sqlalchemy import create_engine, String, Integer, Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint, Index",
+    "from sqlalchemy import create_engine, String, Integer, BigInteger, Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint, Index"
+)
+for col in ("start_time_ms", "last_trade_ms", "opened_ms", "closed_ms"):
+    models_src = models_src.replace(
+        f"{col}: Mapped[int | None] = mapped_column(Integer, nullable=True)",
+        f"{col}: Mapped[int | None] = mapped_column(BigInteger, nullable=True)"
+    )
+models_path.write_text(models_src)
+
+# DB-backed progress checkpoints are polled by the UI and survive browser refreshes.
+collector_path = root / "collector.py"
+collector_src = collector_path.read_text()
+if "def _update_scan_progress(" not in collector_src:
+    helper = '''def _update_scan_progress(run_id, message, details, found_count=None, updated_count=None, error_count=None):
+    try:
+        with SessionLocal() as db:
+            run = db.get(ScanRun, int(run_id))
+            if not run or run.status not in ("RUNNING", "QUEUED"):
+                return
+            run.message = str(message)[:2000]
+            run.details_json = _json(details)
+            if found_count is not None: run.found_count = int(found_count)
+            if updated_count is not None: run.updated_count = int(updated_count)
+            if error_count is not None: run.error_count = int(error_count)
+            db.commit()
+    except Exception:
+        import logging
+        logging.getLogger("binance_intel.progress").exception("could_not_persist_scan_progress run_id=%s", run_id)
+
+_DISCOVERY_COOLDOWN_UNTIL = 0.0
+
+'''
+    collector_src = collector_src.replace("def run_discovery(", helper + "def run_discovery(", 1)
+
+# Explicit request/page progress and prompt stop on Binance 418/429, preserving already saved pages.
+start = collector_src.index("def run_discovery(")
+end = collector_src.index("\ndef sync_positions_for_trader(", start)
+discovery = r'''def run_discovery(run_id: int, pages_per_mode: int = 2, include_older: bool = True, market_type: str = "FUTURES"):
+    """Discover the union of public leaderboard pages and persist live progress."""
+    global _DISCOVERY_COOLDOWN_UNTIL
+    import logging
+    log = logging.getLogger("binance_intel.discovery")
+    remaining = int(_DISCOVERY_COOLDOWN_UNTIL - time.time())
+    if remaining > 0:
+        with SessionLocal() as db:
+            run = db.get(ScanRun, run_id)
+            if run:
+                run.status = "DEFERRED"; run.finished_at = utcnow(); run.error_count = 0
+                run.message = f"Discovery deferred: Binance rate-limit cooldown active for {remaining}s; no requests sent."
+                run.details_json = _json({"phase":"DEFERRED","progress_pct":0,"cooldown_remaining_seconds":remaining,"current_action":"Waiting for Binance cooldown"})
+                db.commit()
+        return
+
+    client = BinancePublicClient()
+    total_new = total_updated = errors = 0
+    requests_done = success_responses = 0
+    halted_by_limit = False
+    modes = [(r, t) for r in (("7D", "30D", "90D", "180D", "365D") if include_older else ("7D", "30D", "365D")) for t in ("ROI", "PNL", "SHARP_RATIO", "WIN_RATE", "AUM")]
+    pages_limit = max(1, min(int(pages_per_mode), 30))
+    estimated = len(modes) * pages_limit
+    notes = []
+    snapshot_seen = set()
+    started = time.monotonic()
+    _update_scan_progress(run_id, f"{market_type} discovery starting · {len(modes)} rankings · up to {estimated} page requests.", {
+        "phase":"DISCOVERY","progress_pct":0,"ranking_count":len(modes),"rankings_completed":0,
+        "requests_completed":0,"requests_estimated":estimated,"pages_per_ranking":pages_limit,
+        "profiles_found":0,"observations_updated":0,"source_errors":0,"current_action":"Preparing public Binance leaderboard"
+    }, 0, 0, 0)
+    try:
+        for mode_index, (time_range, data_type) in enumerate(modes, start=1):
+            if halted_by_limit: break
+            mode_has_rows = False
+            for page in range(1, pages_limit + 1):
+                action = f"{time_range} / {data_type} ranking, page {page}/{pages_limit}"
+                _update_scan_progress(run_id, f"{market_type} discovery · ranking {mode_index}/{len(modes)} · {action} · {requests_done}/{estimated} requests.", {
+                    "phase":"DISCOVERY","progress_pct":min(99, int(requests_done*100/max(1,estimated))),
+                    "ranking_index":mode_index,"ranking_count":len(modes),"rankings_completed":mode_index-1,
+                    "time_range":time_range,"data_type":data_type,"page":page,"pages_per_ranking":pages_limit,
+                    "requests_completed":requests_done,"requests_estimated":estimated,"profiles_found":total_new,
+                    "observations_updated":total_updated,"source_errors":errors,"current_action":"Requesting "+action
+                }, total_new, total_updated, errors)
+                try:
+                    resp = client.list_futures(page, time_range, data_type) if market_type == "FUTURES" else client.list_spot(page, time_range, data_type)
+                    requests_done += 1
+                    success_responses += 1
+                    rows, data = _data_list(resp)
+                    if not rows:
+                        notes.append(f"{time_range}/{data_type} p{page}: empty response")
+                        break
+                    page_new = page_updated = 0
+                    with SessionLocal() as db:
+                        for row in rows:
+                            trader, is_new = _upsert_trader(db, row, market_type, time_range, snapshot_seen)
+                            if trader:
+                                total_new += int(is_new); total_updated += int(not is_new)
+                                page_new += int(is_new); page_updated += int(not is_new)
+                        db.commit()
+                    mode_has_rows = True
+                    pct = min(99, int(requests_done*100/max(1,estimated)))
+                    elapsed = int(time.monotonic()-started)
+                    message = f"{market_type} discovery {pct}% · {mode_index}/{len(modes)} rankings · {requests_done}/{estimated} requests · {total_new} new profiles · {total_updated} refreshed observations · {elapsed}s elapsed."
+                    _update_scan_progress(run_id, message, {
+                        "phase":"DISCOVERY","progress_pct":pct,"ranking_index":mode_index,"ranking_count":len(modes),
+                        "rankings_completed":mode_index-1,"time_range":time_range,"data_type":data_type,"page":page,
+                        "rows_returned":len(rows),"new_profiles_in_page":page_new,"updated_profiles_in_page":page_updated,
+                        "requests_completed":requests_done,"requests_estimated":estimated,"profiles_found":total_new,
+                        "observations_updated":total_updated,"source_errors":errors,"elapsed_seconds":elapsed,
+                        "current_action":f"Saved page: {len(rows)} rows ({page_new} new profiles)"
+                    }, total_new, total_updated, errors)
+                    if len(rows) < 30: break
+                    time.sleep(max(0.1, float(os.getenv("BINANCE_REQUEST_PAUSE", "0.8"))))
+                except Exception as exc:
+                    requests_done += 1
+                    errors += 1
+                    err = str(exc)[:220]
+                    notes.append(f"{time_range}/{data_type} p{page}: {err[:180]}")
+                    response = getattr(exc, "response", None)
+                    code = getattr(response, "status_code", None)
+                    limited = code in (418,429) or "HTTP 418" in err or "HTTP 429" in err or "418 Client Error" in err or "429 Client Error" in err
+                    if limited:
+                        retry = response.headers.get("Retry-After") if response is not None else None
+                        try: cooldown = max(60, int(float(retry))) if retry else (300 if code == 418 or "418" in err else 60)
+                        except (ValueError, TypeError): cooldown = 300 if code == 418 or "418" in err else 60
+                        _DISCOVERY_COOLDOWN_UNTIL = time.time() + cooldown
+                        halted_by_limit = True
+                        log.error("discovery_rate_limited run_id=%s status=%s cooldown_seconds=%s", run_id, code, cooldown)
+                    else:
+                        log.exception("discovery_request_failed run_id=%s market=%s period=%s metric=%s page=%s",run_id,market_type,time_range,data_type,page)
+                    _update_scan_progress(run_id, f"{market_type} discovery failed on {action}: {err}. {'Pausing on rate limit.' if limited else 'Advancing to the next ranking.'}", {
+                        "phase":"RATE_LIMITED" if limited else "DISCOVERY","progress_pct":min(99,int(requests_done*100/max(1,estimated))),
+                        "ranking_index":mode_index,"ranking_count":len(modes),"rankings_completed":mode_index-1,
+                        "time_range":time_range,"data_type":data_type,"page":page,"requests_completed":requests_done,
+                        "requests_estimated":estimated,"profiles_found":total_new,"observations_updated":total_updated,
+                        "source_errors":errors,"cooldown_seconds":cooldown if limited else 0,
+                        "current_action":"Rate-limit cooldown" if limited else "Request error"
+                    },total_new,total_updated,errors)
+                    break
+            if market_type == "SPOT" and not client.spot_list_path: break
+            if mode_has_rows and not halted_by_limit:
+                _update_scan_progress(run_id, f"{market_type} discovery · completed ranking {mode_index}/{len(modes)} ({time_range}/{data_type}).", {
+                    "phase":"DISCOVERY","progress_pct":min(99,int(requests_done*100/max(1,estimated))),
+                    "ranking_index":mode_index,"ranking_count":len(modes),"rankings_completed":mode_index,
+                    "time_range":time_range,"data_type":data_type,"requests_completed":requests_done,
+                    "requests_estimated":estimated,"profiles_found":total_new,"observations_updated":total_updated,
+                    "source_errors":errors,"current_action":"Ranking complete"
+                },total_new,total_updated,errors)
+        elapsed = int(time.monotonic()-started)
+        if halted_by_limit:
+            status="DEFERRED"; phase="RATE_LIMITED"; pct=min(99,int(requests_done*100/max(1,estimated)))
+            message=f"{market_type} discovery paused after Binance rate limiting. Saved partial data: {total_new} new profiles and {total_updated} refreshed observations; {errors} errors. Cooldown active."
+        elif errors and (total_new+total_updated or success_responses):
+            status="PARTIAL"; phase="PARTIAL"; pct=min(99,int(requests_done*100/max(1,estimated)))
+            message=f"{market_type} discovery partially completed: {total_new} new profiles, {total_updated} refreshed observations, {errors} source errors, {requests_done}/{estimated} requests ({elapsed}s)."
+        elif errors:
+            status="FAILED"; phase="FAILED"; pct=0
+            message=f"{market_type} discovery failed: {errors} source errors, {requests_done}/{estimated} requests ({elapsed}s)."
+        elif total_new+total_updated:
+            status="COMPLETED"; phase="COMPLETED"; pct=100
+            message=f"{market_type} discovery finished: {total_new} new profiles, {total_updated} refreshed observations, 0 source errors, {requests_done}/{estimated} requests ({elapsed}s). This is the union of returned public leaderboard pages, not all Binance portfolios."
+        else:
+            status="EMPTY"; phase="EMPTY"; pct=100
+            message=f"{market_type} discovery returned no profile rows after {requests_done}/{estimated} requests ({elapsed}s); check source notes."
+        with SessionLocal() as db:
+            run = db.get(ScanRun, run_id)
+            if run:
+                run.status=status; run.finished_at=utcnow(); run.found_count=total_new; run.updated_count=total_updated
+                run.error_count=errors; run.message=message
+                run.details_json=_json({"phase":phase,"progress_pct":pct,"ranking_count":len(modes),
+                    "pages_per_mode":pages_limit,"requests_completed":requests_done,"requests_estimated":estimated,
+                    "profiles_found":total_new,"observations_updated":total_updated,"source_errors":errors,
+                    "elapsed_seconds":elapsed,"rate_limit_cooldown_seconds":max(0,int(_DISCOVERY_COOLDOWN_UNTIL-time.time())) if halted_by_limit else 0,
+                    "notes":notes[:150],"spot_list_endpoint":client.spot_list_path if market_type=="SPOT" else None,
+                    "data_quality":"SOURCE_ERROR" if errors and not (total_new+total_updated) else ("PARTIAL_SOURCE" if errors else ("SOURCE_VERIFIED" if total_new+total_updated else "EMPTY_SOURCE_RESPONSE"))})
+            db.commit()
+    except Exception as exc:
+        log.exception("discovery_crashed run_id=%s market=%s",run_id,market_type)
+        with SessionLocal() as db:
+            run=db.get(ScanRun,run_id)
+            if run:
+                run.status="FAILED";run.finished_at=utcnow();run.error_count=errors+1
+                run.message=f"Discovery crashed: {str(exc)[:1800]}"
+                run.details_json=_json({"phase":"FAILED","progress_pct":0,"requests_completed":requests_done,
+                    "requests_estimated":estimated,"profiles_found":total_new,"observations_updated":total_updated,
+                    "source_errors":errors+1,"notes":notes[-50:]})
+            db.commit()
+'''
+collector_src = collector_src[:start] + discovery + collector_src[end:]
+collector_src = collector_src.replace(
+    "def sync_positions_for_trader(trader_id: int, max_pages: int = 40):",
+    "def sync_positions_for_trader(trader_id: int, max_pages: int = 40, run_id: int | None = None):", 1
+)
+collector_src = collector_src.replace(
+'''        for page in range(1, pages + 1):
+            resp = client.history_futures(portfolio_id, page, 50) if market_type == "FUTURES" else client.history_spot(portfolio_id, page, 50)''',
+'''        for page in range(1, pages + 1):
+            if run_id is not None:
+                _update_scan_progress(run_id, f"History sync · {market_type} profile {trader_id} · fetching page {page}/{pages}.",
+                    {"phase":"HISTORY_SYNC","market_type":market_type,"trader_id":trader_id,"portfolio_id":portfolio_id,"page":page,
+                     "pages_estimated":pages,"progress_pct":min(99,int((page-1)*100/max(1,pages))),
+                     "current_action":f"Fetching closed-position history page {page}/{pages}"})
+            resp = client.history_futures(portfolio_id, page, 50) if market_type == "FUTURES" else client.history_spot(portfolio_id, page, 50)''', 1
+)
+collector_src = collector_src.replace(
+'''    for tid in ids:
+        try:
+            r = sync_positions_for_trader(tid)''',
+'''    for index, tid in enumerate(ids, start=1):
+        _update_scan_progress(run_id, f"History batch {index}/{len(ids)} · syncing profile #{tid}.",
+            {"phase":"HISTORY_SYNC","profile_index":index,"profiles_total":len(ids),
+             "progress_pct":min(99,int((index-1)*100/max(1,len(ids)))),"current_action":f"Syncing profile #{tid}"},
+            good, positions, bad)
+        try:
+            r = sync_positions_for_trader(tid, run_id=run_id)''', 1
+)
+collector_path.write_text(collector_src)
+
+# Repair already-created PostgreSQL columns in-place at app startup.
+app_path = root / "app.py"
+app_src = app_path.read_text()
+app_src = app_src.replace(
+    "from models import SessionLocal, Trader, Position, TraderSnapshot, ScanRun, utcnow",
+    "from models import SessionLocal, Trader, Position, TraderSnapshot, ScanRun, utcnow, engine", 1
+)
+if "def _repair_postgres_timestamp_columns():" not in app_src:
+    repair = '''def _repair_postgres_timestamp_columns():
+    if engine.dialect.name != "postgresql":
+        return
+    statements = (
+        "ALTER TABLE traders ALTER COLUMN start_time_ms TYPE BIGINT",
+        "ALTER TABLE traders ALTER COLUMN last_trade_ms TYPE BIGINT",
+        "ALTER TABLE positions ALTER COLUMN opened_ms TYPE BIGINT",
+        "ALTER TABLE positions ALTER COLUMN closed_ms TYPE BIGINT",
+    )
+    try:
+        with engine.begin() as migration_db:
+            for statement in statements:
+                migration_db.exec_driver_sql(statement)
+        print("database_schema_migration_ok: millisecond timestamp columns are BIGINT")
+    except Exception:
+        import logging
+        logging.getLogger("binance_intel.schema").exception("database_schema_migration_failed")
+        raise
+
+_repair_postgres_timestamp_columns()
+
+'''
+    app_src = app_src.replace("app = Flask(__name__)", repair + "app = Flask(__name__)", 1)
+app_src = app_src.replace("result=sync_positions_for_trader(tid)", "result=sync_positions_for_trader(tid, run_id=runid)", 1)
+if '@app.get("/api/runs/<int:run_id>")' not in app_src:
+    route = '''@app.get("/api/runs/<int:run_id>")
+def api_run_status(run_id):
+    with SessionLocal() as db:
+        run = db.get(ScanRun, run_id)
+        if not run:
+            return jsonify({"error":"Run not found"}), 404
+        payload = _run_dict(run)
+    return jsonify(payload), 200
+
+'''
+    app_src = app_src.replace('@app.post("/api/scan")', route + '@app.post("/api/scan")', 1)
+app_path.write_text(app_src)
+
+# Report a per-position heartbeat during candle-path analysis.
+analytics_path = root / "analytics.py"
+analytics_src = analytics_path.read_text()
+old_loop = '''    for pid in ids:
+        try: analyze_position_path(pid); good+=1'''
+new_loop = '''    for index, pid in enumerate(ids, start=1):
+        with SessionLocal() as progress_db:
+            progress_run = progress_db.get(ScanRun, run_id)
+            if progress_run and progress_run.status in ("RUNNING", "QUEUED"):
+                progress_pct = min(99, int((index-1)*100/max(1,len(ids))))
+                progress_run.message = f"{market_type} path analysis {index-1}/{len(ids)} · processing position #{pid}."
+                progress_run.details_json = __import__("json").dumps({"phase":"PATH_ANALYSIS","progress_pct":progress_pct,"position_index":index,
+                    "positions_total":len(ids),"current_position_id":pid,"updated":good,"errors":bad,"current_action":f"Analyzing trade path {index}/{len(ids)}"})
+                progress_run.updated_count = good; progress_run.error_count = bad; progress_db.commit()
+        try: analyze_position_path(pid); good+=1'''
+if old_loop in analytics_src:
+    analytics_src = analytics_src.replace(old_loop, new_loop, 1)
+analytics_path.write_text(analytics_src)
+
+# Visible progress loader and button activity while an exact run ID is being processed.
+css_path = root / "static" / "app.css"
+css = css_path.read_text()
+if ".activity-progress{" not in css:
+    css += """
+/* Live action progress */
+.activity-progress{position:sticky;top:8px;z-index:80;margin:10px 0 16px;padding:14px 16px;border:1px solid #344b61;border-radius:14px;background:rgba(12,22,34,.97);box-shadow:0 14px 40px #0003;color:#e9f1fa;backdrop-filter:blur(10px)}
+.activity-progress.hidden{display:none}.activity-progress-head{display:flex;align-items:center;gap:12px}.activity-progress-copy{min-width:0;flex:1}.activity-progress-title{font-weight:800;font-size:13px}.activity-progress-message{margin-top:4px;color:#a9bbcc;font-size:12px;line-height:1.45;overflow-wrap:anywhere}.activity-progress-state{font-size:10px;letter-spacing:.08em;font-weight:800;color:#8fe8c3;border:1px solid #315d52;padding:5px 8px;border-radius:999px}.activity-progress-dismiss{border:0;background:transparent;color:#a9bbcc;cursor:pointer;font-size:20px;padding:2px 6px}.activity-spinner{width:22px;height:22px;flex:0 0 22px;border:2px solid #2b4758;border-top-color:#69e5b7;border-radius:50%;animation:activity-spin .8s linear infinite}.activity-progress-track{height:5px;margin-top:12px;border-radius:99px;background:#233545;overflow:hidden}.activity-progress-fill{width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,#65e5b7,#83c7ff);transition:width .3s ease}.activity-progress-fill.indeterminate{width:38%;animation:activity-runner 1.3s ease-in-out infinite}.activity-progress-foot{display:flex;justify-content:space-between;gap:12px;margin-top:7px;color:#8da4b9;font-size:10px}.activity-mini-spin{display:inline-block;animation:activity-spin .8s linear infinite}@keyframes activity-spin{to{transform:rotate(360deg)}}@keyframes activity-runner{0%{transform:translateX(-120%)}100%{transform:translateX(360%)}}
+@media(max-width:600px){.activity-progress{top:4px;margin:6px 0 10px;padding:11px}.activity-progress-state{display:none}.activity-progress-message{font-size:11px}}
+"""
+    css_path.write_text(css)
+
+js_path = root / "static" / "app.js"
+js = js_path.read_text()
+new_action = r'''function ensureActivityProgress(){
+  let panel=$('#activity-progress');if(panel)return panel;
+  panel=document.createElement('section');panel.id='activity-progress';panel.className='activity-progress hidden';panel.setAttribute('role','status');panel.setAttribute('aria-live','polite');
+  panel.innerHTML='<div class="activity-progress-head"><span class="activity-spinner" id="activity-spinner"></span><div class="activity-progress-copy"><div class="activity-progress-title" id="activity-progress-title">Working…</div><div class="activity-progress-message" id="activity-progress-message">Waiting for the server…</div></div><span class="activity-progress-state" id="activity-progress-state">RUNNING</span><button class="activity-progress-dismiss" id="activity-progress-dismiss" type="button" aria-label="Dismiss progress">×</button></div><div class="activity-progress-track"><div class="activity-progress-fill indeterminate" id="activity-progress-fill"></div></div><div class="activity-progress-foot"><span id="activity-progress-detail">Live server status</span><span id="activity-progress-percent">In progress</span></div>';
+  document.body.insertBefore(panel,document.body.firstChild);
+  $('#activity-progress-dismiss').addEventListener('click',()=>panel.classList.add('hidden'));
+  return panel;
+}
+function showActivityProgress(title,message,pct=null,status='RUNNING',detail='Live server status'){
+  ensureActivityProgress();$('#activity-progress').classList.remove('hidden');$('#activity-progress-title').textContent=title;$('#activity-progress-message').textContent=message||'Working…';$('#activity-progress-state').textContent=status||'RUNNING';$('#activity-progress-detail').textContent=detail||'';
+  const fill=$('#activity-progress-fill');const valid=pct!==null&&pct!==''&&Number.isFinite(Number(pct));
+  if(valid){fill.classList.remove('indeterminate');fill.style.width=Math.max(0,Math.min(100,Number(pct)))+'%';$('#activity-progress-percent').textContent=Math.round(Math.max(0,Math.min(100,Number(pct))) )+'%';}
+  else{fill.classList.add('indeterminate');fill.style.width='38%';$('#activity-progress-percent').textContent='In progress';}
+  $('#activity-spinner').style.display=['COMPLETED','PARTIAL','FAILED','EMPTY','DEFERRED','BLOCKED','SKIPPED'].includes(String(status).toUpperCase())?'none':'block';
+}
+function parseRunDetails(run){try{return JSON.parse(run.details_json||'{}')}catch{return {}}}
+async function watchActionRun(runId,what){
+  const started=Date.now();let lastRun=null;
+  while(Date.now()-started<45*60*1000){
+    const run=await api('/api/runs/'+runId);lastRun=run;const d=parseRunDetails(run);const status=String(run.status||'RUNNING').toUpperCase();
+    const pct=Object.prototype.hasOwnProperty.call(d,'progress_pct')?d.progress_pct:(['COMPLETED','PARTIAL','EMPTY'].includes(status)?100:null);
+    const elapsed=Math.round((Date.now()-started)/1000);
+    const detail=d.requests_completed!==undefined?d.requests_completed+'/'+(d.requests_estimated||'?')+' requests · '+elapsed+'s elapsed':d.position_index!==undefined?Math.max(0,d.position_index-1)+'/'+(d.positions_total||'?')+' trades · '+elapsed+'s elapsed':d.profile_index!==undefined?Math.max(0,d.profile_index-1)+'/'+(d.profiles_total||'?')+' profiles · '+elapsed+'s elapsed':'Run #'+runId+' · '+elapsed+'s elapsed';
+    showActivityProgress(what,run.message||d.current_action||'Processing…',pct,status,detail);
+    if(['COMPLETED','PARTIAL','FAILED','EMPTY','DEFERRED','BLOCKED','SKIPPED'].includes(status))break;
+    await new Promise(resolve=>setTimeout(resolve,1200));
+  }
+  if(!lastRun)return null;
+  const status=String(lastRun.status||'RUNNING').toUpperCase();
+  if(status==='COMPLETED')toast(what+' completed: '+(lastRun.message||'Finished.'),'success');
+  else if(['PARTIAL','EMPTY','DEFERRED','BLOCKED','SKIPPED','FAILED'].includes(status))toast(what+': '+(lastRun.message||status),'error');
+  setTimeout(()=>{const el=$('#activity-progress-state');if(el&&String(el.textContent).toUpperCase()===status)$('#activity-progress').classList.add('hidden')},12000);
+  await refreshStatus();loadRunsOnly();loadTradersMaybe();if(state.view==='history')loadPaths();if(state.view==='system')loadSystem();
+  return lastRun;
+}
+async function runAction(path,body,what,button=null){
+  const btn=button||((document.activeElement instanceof HTMLElement&&document.activeElement.tagName==='BUTTON')?document.activeElement:null);
+  const original=btn?btn.innerHTML:null;
+  if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');btn.innerHTML='<span class="activity-mini-spin">⟳</span> Working…';}
+  showActivityProgress(what,'Submitting action to the server…',0,'QUEUED','Waiting for run ID');
+  try{const r=await api(path,{method:'POST',body:JSON.stringify(body)});showActivityProgress(what,what+' started · run #'+r.run_id,0,'RUNNING','Run #'+r.run_id+' · waiting for live progress');toast(what+' started (run #'+r.run_id+'). Live progress is shown above.','success');await watchActionRun(r.run_id,what);}
+  catch(e){showActivityProgress(what,e.message,null,'FAILED','Request failed');toast(what+' failed: '+e.message,'error');setTimeout(()=>$('#activity-progress')?.classList.add('hidden'),12000);}
+  finally{if(btn){btn.disabled=false;btn.removeAttribute('aria-busy');btn.innerHTML=original;}}
+}'''
+if "async function runAction(path,body,what){" in js:
+    start_js=js.index("async function runAction(path,body,what){")
+    end_js=js.index("\nfunction loadTradersMaybe",start_js)
+    js=js[:start_js]+new_action+js[end_js:]
+js = js.replace("'Discovery'));", "'Discovery',$('#btn-scan')));")
+js = js.replace("'History sync'));", "'History sync',$('#btn-history')));")
+js = js.replace("'Path analysis'));", "'Path analysis',$('#btn-paths')));")
+js = js.replace("only_unanalyzed:true},'Path analysis',$('#btn-paths')));", "only_unanalyzed:true},'Path analysis',$('#btn-paths-2')));", 1)
+js = js.replace("'Trader history sync');$('#detail-paths'", "'Trader history sync',$('#detail-sync'));$('#detail-paths'")
+js = js.replace("'Trader path analysis');$('#trader-detail'", "'Trader path analysis',$('#detail-paths'));$('#trader-detail'")
+js_path.write_text(js)
+
+# Default to a quick breadth-first pass; the checkbox enables older/expanded ranking coverage.
+html_path = root / "templates" / "index.html"
+html = html_path.read_text()
+html = html.replace('id="scan-pages" type="number" min="1" max="30" value="2"', 'id="scan-pages" type="number" min="1" max="30" value="1"')
+html = html.replace('id="scan-older" checked', 'id="scan-older"')
+html_path.write_text(html)
