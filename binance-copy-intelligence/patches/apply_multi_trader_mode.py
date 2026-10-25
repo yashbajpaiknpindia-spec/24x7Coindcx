@@ -1508,10 +1508,14 @@ if "spot_probe_restore_attempted" not in app_src:
         except Exception:
             app.logger.exception("spot_probe_restore_failed")
 '''
-    newline = app_src.find("\n",monitor_start)
-    # place immediately before the first while loop to avoid rerunning restore every cycle
-    while_pos = app_src.find("while True:",monitor_start)
-    app_src = app_src[:while_pos-8] + restore + app_src[while_pos-8:]
+    # Insert at the beginning of the monitor function's while-body boundary without
+    # slicing into the preceding statement (which can corrupt time.sleep(...)).
+    while_pos = app_src.find("while True:", monitor_start)
+    if while_pos < 0:
+        raise RuntimeError("Cannot restore Spot probe settings: monitor loop anchor missing")
+    line_start = app_src.rfind("\n", 0, while_pos) + 1
+    restore = "\n".join(line[4:] if line.startswith("        ") else line for line in restore.splitlines()) + "\n"
+    app_src = app_src[:line_start] + restore + app_src[line_start:]
 
 app_path.write_text(app_src)
 
