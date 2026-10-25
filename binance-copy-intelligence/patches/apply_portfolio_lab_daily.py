@@ -98,3 +98,37 @@ if (__import__("os").getenv("ENABLE_SCHEDULER","false").lower() in ("1","true","
 '''
     p.write_text(s)
 print('Daily persistence loop installed')
+
+
+# Expose saved once-per-day forecasts in the dashboard; only persisted runs are returned.
+s=p.read_text()
+if "@app.get('/api/portfolio-lab/daily-history')" not in s:
+    s += r'''
+
+@app.get('/api/portfolio-lab/daily-history')
+def pl_daily_history():
+    market=str(pl_request.args.get("market_type","FUTURES")).upper()
+    if market not in ("FUTURES","SPOT"):
+        return pl_jsonify({"error":"invalid market_type"}),400
+    with SessionLocal() as db:
+        runs=list(db.scalars(select(ScanRun).where(
+            ScanRun.kind=="PORTFOLIO_OUTLOOK",ScanRun.market_type==market
+        ).order_by(ScanRun.started_at.desc(),ScanRun.id.desc()).limit(30)))
+        out=[]
+        for r in runs:
+            try: details=_pl_json.loads(r.details_json or "{}")
+            except Exception: details={}
+            out.append({"id":r.id,"market_type":r.market_type,"status":r.status,
+                "started_at":r.started_at.isoformat() if r.started_at else None,
+                "finished_at":r.finished_at.isoformat() if r.finished_at else None,
+                "found_count":r.found_count,"updated_count":r.updated_count,"error_count":r.error_count,
+                "message":r.message,"investment_usd":details.get("investment_usd"),
+                "forecastable_count":details.get("forecastable_count"),
+                "insufficient_history_count":details.get("insufficient_history_count"),
+                "ranked_top_20":details.get("ranked_top_20",[]),
+                "forecast_method":details.get("forecast_method"),
+                "limitations":details.get("limitations",[])})
+    return pl_jsonify({"market_type":market,"items":out,"count":len(out),
+        "note":"Snapshots are the default $250 daily research scenario and do not represent real copier account equity."})
+'''
+    p.write_text(s)
