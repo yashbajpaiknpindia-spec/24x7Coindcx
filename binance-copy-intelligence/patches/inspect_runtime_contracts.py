@@ -44,8 +44,8 @@ if "credentials:opts.credentials||'same-origin'" not in js:
     js = js.replace(old_fetch, new_fetch, 1)
 
 # Auto-run portfolio forecast on entry or refresh.
-old_load = "plRenderPortfolios();if(!pl.portfolios.length"
-new_load = "plRenderPortfolios();await plRunForecast();if(!pl.portfolios.length"
+old_load = "plRenderPortfolios();await plLoadDailyHistory();if(!pl.portfolios.length"
+new_load = "plRenderPortfolios();await plLoadDailyHistory();await plRunForecast();if(!pl.portfolios.length"
 if new_load not in js:
     if js.count(old_load) != 1:
         raise RuntimeError(f"Portfolio Lab load anchor count={js.count(old_load)}")
