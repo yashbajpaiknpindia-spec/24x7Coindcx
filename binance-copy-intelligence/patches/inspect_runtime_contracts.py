@@ -106,11 +106,12 @@ if "PL_RANK_LEVERAGE_COVERAGE_V2" not in js:
     if js.count(old_lev_cell) != 1:
         raise RuntimeError(f"Could not extend ranking leverage cell; anchor count={js.count(old_lev_cell)}")
     js = js.replace(old_lev_cell, new_lev_cell, 1)
-    js += "\\n// PL_RANK_LEVERAGE_COVERAGE_V2\\n"
+    js += "\n// PL_RANK_LEVERAGE_COVERAGE_V2\n"
     js_path.write_text(js)
 
 # Keep table headers aligned with the new columns and enlarge all dashboard typography for laptops.
 html = html_path.read_text()
+html = html.replace("<th>Observed leverage</th>", "<th>Observed median / max leverage · coverage</th>", 1)
 html = html.replace(
     "<th>Portfolio / official page</th><th>Expected PnL</th>",
     "<th>Portfolio / official page · market shown</th><th>Source win rate</th><th>Closed-trade win rate</th><th>Expected PnL</th>",
