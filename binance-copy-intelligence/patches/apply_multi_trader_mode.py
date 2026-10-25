@@ -1760,3 +1760,19 @@ button,select,input{font-size:14px}
 @media(max-width:760px){.kpi-value{font-size:30px!important}.table-scroll td{font-size:12.5px!important}.ledger-filters label{min-width:125px;flex:1}.ledger-filters .primary-button{width:100%}}
 """
     css_path.write_text(css)
+
+
+# --- import newly added collector tasks before monitor startup ---
+app_path = root / "app.py"
+app_src = app_path.read_text()
+task_import = "from collector import run_trader_detail_batch, run_public_feed_probe"
+if task_import not in app_src:
+    model_import = "from models import SessionLocal, Trader, Position, TraderSnapshot, ScanRun, utcnow, engine"
+    if app_src.count(model_import) == 1:
+        app_src = app_src.replace(model_import, task_import + "\n" + model_import, 1)
+    else:
+        fallback = "from models import SessionLocal"
+        if app_src.count(fallback) < 1:
+            raise RuntimeError("Cannot add collector task imports: model import anchor missing")
+        app_src = app_src.replace(fallback, task_import + "\n" + fallback, 1)
+app_path.write_text(app_src)
