@@ -7,6 +7,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tar xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && cat /tmp/bundle/part* | base64 -d | tar -xJ -C /app \
+    && python /tmp/patches/inspect_collector.py \
     && python /tmp/patches/apply_runtime_fixes.py \
     && python /tmp/patches/apply_multi_trader_mode.py \
     && python /tmp/patches/apply_portfolio_lab_api.py \
