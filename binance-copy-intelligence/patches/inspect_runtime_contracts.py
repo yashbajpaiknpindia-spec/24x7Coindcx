@@ -66,7 +66,7 @@ if "PL_FORENSICS_COLUMNS_V2" not in js:
     if old_row in js:
         js = js.replace(old_row, new_row, 1)
     else:
-        print("WARNING: Portfolio Lab row patch did not match; continuing")
+        raise RuntimeError("Cannot patch Portfolio Lab ranking row: source anchor mismatch")
     js = js.replace(
         "const rows=[['Closed records',b.closed_pnl_records],['Closed-trade win rate',plPct(b.closed_trade_win_rate_pct)]",
         "const rows=[['Market',b.market_type||pl.market],['Source platform win rate',plPct(b.source_platform_win_rate_pct)],['Closed records',b.closed_pnl_records],['Closed-trade win rate',plPct(b.closed_trade_win_rate_pct)]",
@@ -74,7 +74,7 @@ if "PL_FORENSICS_COLUMNS_V2" not in js:
     )
     js = js.replace(
         "['Maximum leverage',b.max_observed_leverage===null?'—':Number(b.max_observed_leverage).toFixed(2)+'×'],['Average MAE'",
-        "['Maximum leverage',b.max_observed_leverage===null?'—':Number(b.max_observed_leverage).toFixed(2)+'×'],['Leverage data coverage',plPct(b.leverage_coverage_pct)],['Average MAE'",
+        "['Maximum leverage',b.market_type==='SPOT'?'Spot (not leveraged)':(b.max_observed_leverage===null?'Unknown':Number(b.max_observed_leverage).toFixed(2)+'×')],['Leverage data coverage',plPct(b.leverage_coverage_pct)],['Average MAE'",
         1
     )
     js = js.replace(
@@ -82,7 +82,13 @@ if "PL_FORENSICS_COLUMNS_V2" not in js:
         "margin allocation per trade; ROI is used as reported and is not multiplied by leverage twice. Observed leverage informs notional cost estimates; missing leverage is labelled as incomplete evidence."
     )
     # These are the Portfolio Lab's ten-column table placeholders; two win-rate columns are added.
-    js = js.replace('colspan="10" class="empty-state">Run a forecast', 'colspan="12" class="empty-state">Run a forecast', 1)
+    # Keep forecast loading, empty, and error rows aligned with the 12-column ranking table.
+    forecast_start = js.find("async function plRunForecast()")
+    forecast_end = js.find("function plRenderDailyForecast()", forecast_start)
+    if forecast_start < 0 or forecast_end < 0:
+        raise RuntimeError("Cannot align Portfolio Lab forecast table placeholders")
+    forecast_js = js[forecast_start:forecast_end].replace('colspan="10" class="empty-state"', 'colspan="12" class="empty-state"')
+    js = js[:forecast_start] + forecast_js + js[forecast_end:]
     # Error-state text is rendered by JS and does not need a colspan rewrite.
     js += "\n// PL_FORENSICS_COLUMNS_V2\n"
 
@@ -100,6 +106,11 @@ js_path.write_text(js)
 
 # Keep table headers aligned with the new columns and enlarge all dashboard typography for laptops.
 html = html_path.read_text()
+html = html.replace(
+    '<tbody id="pl-rank-rows"><tr><td colspan="10" class="empty-state">Run a forecast to rank available evidence.</td></tr></tbody>',
+    '<tbody id="pl-rank-rows"><tr><td colspan="12" class="empty-state">Run a forecast to rank available evidence.</td></tr></tbody>',
+    1
+)
 html = html.replace(
     "<th>Portfolio / official page</th><th>Expected PnL</th>",
     "<th>Portfolio / official page · market shown</th><th>Source win rate</th><th>Closed-trade win rate</th><th>Expected PnL</th>",
@@ -150,9 +161,9 @@ if "PL_FORECAST_LEVERAGE_AND_WINRATE_V2" not in app:
         1
     )
     old_lev = "'observed_median_leverage':__import__('statistics').median([float(p.leverage) for p in hist if p.leverage is not None]) if any(p.leverage is not None for p in hist) else None,"
-    new_lev = """'observed_median_leverage':(1.0 if market=='SPOT' else (__import__('statistics').median([float(p.leverage) for p in hist if p.leverage is not None and float(p.leverage)>0]) if any(p.leverage is not None and float(p.leverage)>0 for p in hist) else None)),
-                'observed_max_leverage':(1.0 if market=='SPOT' else (max([float(p.leverage) for p in hist if p.leverage is not None and float(p.leverage)>0]) if any(p.leverage is not None and float(p.leverage)>0 for p in hist) else None)),
-                'leverage_coverage_pct':(100.0 if market=='SPOT' else (100.0*sum(1 for p in hist if p.leverage is not None and float(p.leverage)>0)/len(hist) if hist else 0.0)),
+    new_lev = """'observed_median_leverage':(None if market=='SPOT' else (__import__('statistics').median([float(p.leverage) for p in hist if p.leverage is not None and float(p.leverage)>0]) if any(p.leverage is not None and float(p.leverage)>0 for p in hist) else None)),
+                'observed_max_leverage':(None if market=='SPOT' else (max([float(p.leverage) for p in hist if p.leverage is not None and float(p.leverage)>0]) if any(p.leverage is not None and float(p.leverage)>0 for p in hist) else None)),
+                'leverage_coverage_pct':(None if market=='SPOT' else (100.0*sum(1 for p in hist if p.leverage is not None and float(p.leverage)>0)/len(hist) if hist else 0.0)),
                 'leverage_unknown_trades':(0 if market=='SPOT' else sum(1 for p in hist if p.leverage is None or float(p.leverage)<=0)),
                 'closed_trade_win_rate_pct':(100.0*sum(1 for p in hist if p.close_pnl is not None and float(p.close_pnl)>0)/sum(1 for p in hist if p.close_pnl is not None) if any(p.close_pnl is not None for p in hist) else None),"""
     if old_lev in app:
