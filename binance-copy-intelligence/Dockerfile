@@ -11,6 +11,7 @@ RUN apt-get update \
     && python /tmp/patches/apply_multi_trader_mode.py \
     && python /tmp/patches/apply_portfolio_lab_api.py \
     && python /tmp/patches/apply_portfolio_lab_forecast.py \
+    && python /tmp/patches/apply_portfolio_lab_daily.py \
     && python /tmp/patches/apply_portfolio_lab_markup.py \
     && python /tmp/patches/apply_portfolio_lab_ui.py \
     && rm -rf /tmp/bundle /tmp/patches \
