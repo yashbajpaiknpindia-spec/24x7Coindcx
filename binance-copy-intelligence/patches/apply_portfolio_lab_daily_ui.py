@@ -11,7 +11,7 @@ if 'id="pl-daily-history-rows"' not in h:
 js_path=root/"static"/"app.js"
 js=js_path.read_text()
 if "async function plLoadDailyHistory()" not in js:
-    code = '''
+    code = r'''
 async function plLoadDailyHistory(){
   try{
     const d=await api("/api/portfolio-lab/daily-history?market_type="+encodeURIComponent(pl.market));
