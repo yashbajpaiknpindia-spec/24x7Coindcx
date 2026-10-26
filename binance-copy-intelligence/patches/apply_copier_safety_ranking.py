@@ -355,4 +355,66 @@ if "COPIER_SAFETY_BOARD_V1" not in html:
     html = html.replace("</body>", inline + "\n</body>", 1)
 html_path.write_text(html)
 
+
+# Apply the same copier gate and PnL/longevity ordering to the primary Trade Behaviour API,
+# not only the independent safety panel at the top of that page.
+app = app_path.read_text()
+if "TRADE_BEHAVIOUR_COPIER_PRIORITY_V1" not in app:
+    start = app.find("def api_trade_behaviour():")
+    end = app.find("\n# COPIER_SAFETY_RANKING_V1", start)
+    if start < 0 or end < 0:
+        raise RuntimeError("Cannot locate Trade Behaviour API for copier-priority ranking")
+    fn = app[start:end]
+
+    anchor = "        ids=[t.id for t in traders]"
+    if fn.count(anchor) != 1:
+        raise RuntimeError("Trade Behaviour profile IDs anchor count=" + str(fn.count(anchor)))
+    fn = fn.replace(anchor, "        copier_metrics_by_id = _bi_copier_metrics(db, traders, 90, 72)\n" + anchor, 1)
+
+    anchor = "        for t in traders:\n            a=aggregates.get(t.id,"
+    if fn.count(anchor) != 1:
+        raise RuntimeError("Trade Behaviour portfolio loop anchor count=" + str(fn.count(anchor)))
+    fn = fn.replace(anchor, "        for t in traders:\n            copier_safety = copier_metrics_by_id.get(t.id, {})\n            a=aggregates.get(t.id,", 1)
+
+    anchor = '                "stability_score":round(stability,2) if stability is not None else None,'
+    replacement = anchor + '''
+                "copier_pnl_30d":copier_safety.get("copier_pnl_30d"),
+                "copier_pnl_90d":copier_safety.get("copier_pnl_90d"),
+                "copier_pnl_30d_captured_at":copier_safety.get("copier_pnl_30d_captured_at"),
+                "copier_pnl_90d_captured_at":copier_safety.get("copier_pnl_90d_captured_at"),
+                "track_record_days":copier_safety.get("track_record_days"),
+                "copier_pnl_score":copier_safety.get("copier_pnl_score"),
+                "duration_score":copier_safety.get("duration_score"),
+                "copier_duration_score":copier_safety.get("copier_duration_score"),
+                "copy_eligible":bool(copier_safety.get("copy_eligible")),
+                "copy_block_reasons":copier_safety.get("copier_safety_reasons", ["COPIER_SAFETY_EVIDENCE_UNAVAILABLE"]),'''
+    if fn.count(anchor) != 1:
+        raise RuntimeError("Trade Behaviour stability output anchor count=" + str(fn.count(anchor)))
+    fn = fn.replace(anchor, replacement, 1)
+
+    old_sort = '    out.sort(key=lambda x:(metric(x),x.get("stability_confidence_pct",0),x.get("verified_closed_trades",0)),reverse=True)'
+    new_sort = '''    # Copier eligibility is a hard first sort key. Within the safe group, rank by
+    # source copier PnL percentile + source account longevity, then behaviour quality.
+    out.sort(key=lambda x:(
+        x.get("copy_eligible", False),
+        x.get("copier_duration_score") is not None,
+        x.get("copier_duration_score") if x.get("copier_duration_score") is not None else -1,
+        metric(x),
+        x.get("stability_confidence_pct", 0),
+        x.get("verified_closed_trades", 0)
+    ), reverse=True)'''
+    if fn.count(old_sort) != 1:
+        raise RuntimeError("Trade Behaviour sort anchor count=" + str(fn.count(old_sort)))
+    fn = fn.replace(old_sort, new_sort, 1)
+
+    note_anchor = '"note":"PF, closed win rate and realized PnL use verified closed records only. Spot raw activity is counted separately and is not treated as a completed trade."'
+    note_new = '"note":"Copier eligibility is ranked first using fresh nonnegative 30D/90D copier PnL and a minimum 90-day source track record; the within-group rank uses copier-PnL percentile + account longevity, then selected trade-behaviour metric. PF, closed win rate and realized PnL use verified closed records only. Spot raw activity is not treated as a completed trade."'
+    if fn.count(note_anchor) != 1:
+        raise RuntimeError("Trade Behaviour note anchor count=" + str(fn.count(note_anchor)))
+    fn = fn.replace(note_anchor, note_new, 1)
+
+    app = app[:start] + fn + app[end:]
+    app += "\n# TRADE_BEHAVIOUR_COPIER_PRIORITY_V1\n"
+    app_path.write_text(app)
+
 print("Copier-first safety gates installed for Multi-Trader and Portfolio Lab forecasts; independent ranking boards installed on all three pages.")
