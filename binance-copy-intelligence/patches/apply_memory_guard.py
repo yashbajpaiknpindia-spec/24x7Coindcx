@@ -120,7 +120,7 @@ if "RESOURCE_GUARD_V1" not in app:
                     reasons.append("RECENT_30D_ROI_BELOW_FLOOR")
             evidence_gaps=[]
 '''
-    app = replace_once(app, early_spot_block, "            evidence_gaps=[]\\n", "move Spot criteria after reason initialization")
+    app = replace_once(app, early_spot_block, "            evidence_gaps=[]\n", "move Spot criteria after reason initialization")
     spot_reason_anchor = '''            elif pf<min_profit_factor: reasons.append("PROFIT_FACTOR_BELOW_FLOOR")
             score=50+max(-20,min(20,roi7 or 0))*.7+max(-30,min(30,roi30 or 0))*.35+max(-50,min(50,roi90 or 0))*.1
 '''
