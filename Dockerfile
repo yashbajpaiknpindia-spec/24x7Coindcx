@@ -25,6 +25,8 @@ RUN apt-get update \
     && python /tmp/patches/apply_stability_coverage_ui.py \
     && python -m py_compile /tmp/patches/apply_memory_guard.py \
     && python /tmp/patches/apply_memory_guard.py \
+    && python -m py_compile /tmp/patches/apply_research_pages_and_filters.py \
+    && python /tmp/patches/apply_research_pages_and_filters.py \
     && python -m py_compile /tmp/patches/apply_frontend_boot_recovery.py \
     && python /tmp/patches/apply_frontend_boot_recovery.py \
     && python -m py_compile /tmp/patches/apply_frontend_navigation_failsafe.py \
