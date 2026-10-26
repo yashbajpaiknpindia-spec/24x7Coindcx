@@ -20,10 +20,10 @@ if marker not in s:
         raise RuntimeError("Portfolio Lab history anchor not unique: "+str(fn.count(anchor)))
     fn=fn.replace(anchor,anchor+"            copier_safety = copier_metrics_by_id.get(t.id, {})\n",1)
 
-    anchor="            ready=len(hist)>=15 and active>=10 and len(daily)>=10\n"
+    anchor="            ready=len(hist)>=10 and active>=5 and len(daily)>=5\n"
     if fn.count(anchor)!=1:
         raise RuntimeError("Portfolio Lab readiness anchor not unique: "+str(fn.count(anchor)))
-    fn=fn.replace(anchor,"            ready=len(hist)>=15 and active>=10 and len(daily)>=10 and bool(copier_safety.get('copy_eligible'))\n",1)
+    fn=fn.replace(anchor,"            ready=len(hist)>=10 and active>=5 and len(daily)>=5 and bool(copier_safety.get('copy_eligible'))\n",1)
 
     anchor="'forecast_status':'READY' if ready else 'INSUFFICIENT_HISTORY',"
     if fn.count(anchor)!=1:
