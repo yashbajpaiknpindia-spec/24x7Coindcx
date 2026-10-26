@@ -133,15 +133,15 @@ if "BINANCE_INTEL_FRONTEND_RECOVERY_V1" not in html:
     var target=event.target&&event.target.closest?event.target.closest("[data-view]"):null;
     if(!target)return;
     var name=target.getAttribute("data-view");
-    setTimeout(function(){loadView(name).then(function(rows){
+    setTimeout(function(){if(window.__biNavFailsafe)return;loadView(name).then(function(rows){
       if(rows.some(function(x){return !x.ok}))return;
       lastOk=Date.now();
     });},350);
   },true);
-  function start(){setTimeout(function(){boot().catch(function(e){active=false;show("Startup recovery failed: "+(e&&e.message||e),true)});},900);}
+  function start(){if(window.__biNavFailsafe)return;setTimeout(function(){if(window.__biNavFailsafe)return;boot().catch(function(e){active=false;show("Startup recovery failed: "+(e&&e.message||e),true)});},900);}
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start,{once:true});
   else start();
-  window.addEventListener("pageshow",function(){if(!lastOk||Date.now()-lastOk>15000){active=false;boot().catch(function(e){active=false;show(String(e),true)})}});
+  window.addEventListener("pageshow",function(){if(window.__biNavFailsafe)return;if(!lastOk||Date.now()-lastOk>15000){active=false;boot().catch(function(e){active=false;show(String(e),true)})}});
 })();
 </script>
 """
