@@ -204,7 +204,10 @@ def api_trade_behaviour():
     sort_by=str(tb_request.args.get("sort_by","STABILITY")).upper()
     if sort_by not in ("STABILITY","WIN_RATE","PROFIT_FACTOR","NET_PNL","LOWER_ADVERSE","ROI"):
         sort_by="STABILITY"
-    effective_period="30D" if market=="SPOT" and period_days==7 else str(period_days)+"D"
+    # This collector has no verified 7D Spot source metric; map the whole analysis
+    # window to 30 days as well, not just the display label.
+    if market=="SPOT" and period_days==7: period_days=30
+    effective_period=str(period_days)+"D"
     cutoff=int(tb_time.time()*1000)-period_days*86400000
     verified_spot=("PAIRED_SPOT_TRADE","CLOSED_SPOT_TRADE","VERIFIED_SPOT_CLOSED_TRADE")
     with tb_Session() as db:
@@ -433,7 +436,7 @@ js_path.write_text(js)
 # ---------------------------------------------------------------------------
 html=html_path.read_text()
 if 'id="mt-min-win-rate"' not in html:
-    old_roi = '<label>Minimum recent ROI (%) (30D Spot; 7D Futures)<input id="mt-min-roi7" type="number" min="-100" max="100" value="-5"></label></div>'
+    old_roi = '<label>Minimum ROI (%) in selected period<input id="mt-min-roi7" type="number" min="-100" max="100" value="-5"></label></div>'
     if html.count(old_roi)!=1:
         raise RuntimeError(f"Cannot add rank filters: ROI control anchor count={html.count(old_roi)}")
     new_roi = old_roi + '''
