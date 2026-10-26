@@ -413,10 +413,23 @@ html = replace_table_inside_view(
 html = html.replace('id="pl-profile-rows"><tr><td colspan="9" class="empty-state">Loading profiles…</td></tr></tbody></table></div></article>',
                     'id="pl-profile-rows"><tr><td colspan="6" class="empty-state">Loading profiles…</td></tr></tbody></table></div><div class="table-pager"><button id="pl-profile-prev" class="btn secondary" disabled>← Previous</button><span id="pl-profile-page-meta">No rows</span><button id="pl-profile-next" class="btn secondary" disabled>Next →</button></div></article>',1)
 html = html.replace('id="pl-coverage-summary"', 'id="pl-coverage-summary"', 1)
-old_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>'
-new_detail = old_detail + '<div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage will be calculated from source-reported totals, stored records, audit fields and analysed trade paths.</div>'
 if 'id="pl-coverage-summary"' not in html:
-    html = replace_once(html, old_detail, new_detail, "selected profile coverage banner")
+    view_marker = '<section class="view" id="view-portfolio-lab"'
+    view_start = html.find(view_marker)
+    if view_start < 0:
+        raise RuntimeError("Cannot add coverage banner: Portfolio Lab view is missing")
+    view_open_end = html.find(">", view_start)
+    view_close_start = html.find("</section>", view_open_end)
+    if view_open_end < 0 or view_close_start < 0:
+        raise RuntimeError("Cannot delimit Portfolio Lab view for coverage banner")
+    view_end = view_close_start + len("</section>")
+    view_html = html[view_start:view_end]
+    link_match = re.search(r'<div id="pl-official-link"[^>]*>.*?</div>', view_html, re.S)
+    if not link_match:
+        raise RuntimeError("Cannot find the Portfolio Lab official-link element for coverage banner")
+    banner = '<div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage uses source-reported totals, stored trade fields and analysed paths. Missing source totals remain unknown.</div>'
+    view_html = view_html[:link_match.end()] + banner + view_html[link_match.end():]
+    html = html[:view_start] + view_html + html[view_end:]
 
 trade_table = '<table class="compact-table"><thead><tr><th>Entry → close time / status</th><th>Symbol / side</th><th>Entry → exit price</th><th>Leverage / margin</th><th>Closed PnL / ROI</th><th>Adverse / favourable move</th><th>Time to MAE / MFE</th><th>Path coverage / status</th><th>Scenario PnL</th></tr></thead><tbody id="pl-trade-rows"'
 html = replace_table_inside_view(
