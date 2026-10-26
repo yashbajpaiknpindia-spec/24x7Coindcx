@@ -363,27 +363,25 @@ else:
 
 # Compact Multi-Trader ranking table: risk/behaviour first, detail available by Inspect.
 def replace_table_inside_view(document, view_id, table_pattern, new_table, label):
-    # IMPORTANT: scope every generic table pattern to its owning <section class="view">.
-    # Without this guard, a previous page's similarly-shaped table can be matched and
-    # the regex can delete every whole page between that table and the intended tbody.
-    section_pattern = re.compile(
-        r'<section\\b(?=[^>]*\\bclass=["\\'][^"\\']*\\bview\\b[^"\\']*["\\'])(?=[^>]*\\bid=["\\']'
-        + re.escape(view_id) + r'["\\'])[^>]*>',
-        re.I
-    )
-    section_match = section_pattern.search(document)
-    if not section_match:
+    # Scope generic table patterns to the owning view. A page-wide regex can start
+    # at an earlier table and consume whole intervening sections from the HTML.
+    section_marker = f'<section class="view" id="{view_id}"'
+    section_start = document.find(section_marker)
+    if section_start < 0:
         raise RuntimeError(f"Cannot locate owning view {view_id!r} for {label}")
-    section_end = document.find("</section>", section_match.end())
-    if section_end < 0:
+    section_open_end = document.find(">", section_start)
+    if section_open_end < 0:
+        raise RuntimeError(f"Cannot locate opening tag end for {view_id!r} ({label})")
+    section_close_start = document.find("</section>", section_open_end)
+    if section_close_start < 0:
         raise RuntimeError(f"Cannot locate closing view tag for {view_id!r} ({label})")
-    section_end += len("</section>")
-    section_html = document[section_match.start():section_end]
+    section_end = section_close_start + len("</section>")
+    section_html = document[section_start:section_end]
     table_match = re.search(table_pattern, section_html, re.S)
     if not table_match:
         raise RuntimeError(f"Cannot locate {label} inside owning view {view_id!r}")
     section_html = section_html[:table_match.start()] + new_table + section_html[table_match.end():]
-    return document[:section_match.start()] + section_html + document[section_end:]
+    return document[:section_start] + section_html + document[section_end:]
 
 
 # Multi-Trader table replacement is scoped to its own view; never let the match
