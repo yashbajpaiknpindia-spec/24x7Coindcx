@@ -445,4 +445,19 @@ html=html.replace('Requires fresh source data, enough stored closed trades, and 
     'Requires fresh source data, verified win-rate evidence when the win-rate filter is enabled, enough stored closed trades and an estimable profit factor. The selected period drives ROI/MDD screening; the 30D drawdown guard remains active. Spot uses 30D if 7D is requested. Ranking priority changes sorting, never the evidence guardrails.')
 
 js_path.write_text(js)
+
+# Re-cache-bust after ALL JS additions from this patch; the prior cache step runs earlier.
+html = html_path.read_text()
+version = "bi-" + hashlib.sha256(js.encode("utf-8")).hexdigest()[:12]
+cache_pattern = re.compile(
+    r'(?P<prefix><script\\b[^>]*\\bsrc\\s*=\\s*)(?P<q>["\\\'])(?P<src>.*?app\\.js.*?)(?:\\?v=[^"\\\']*)?(?P=q)(?P<suffix>[^>]*>)',
+    re.IGNORECASE | re.DOTALL
+)
+cache_matches = list(cache_pattern.finditer(html))
+if len(cache_matches) != 1:
+    raise RuntimeError(f"Expected exactly one app.js script include for final research-page cache bust; found {len(cache_matches)}")
+match = cache_matches[0]
+html = html[:match.start()] + match.group("prefix") + match.group("q") + match.group("src") + "?v=" + version + match.group("q") + match.group("suffix") + html[match.end():]
+html_path.write_text(html)
+print(f"Research ranking/behaviour pages installed. Final JS cache key: {version}")
 """
