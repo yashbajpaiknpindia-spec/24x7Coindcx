@@ -429,6 +429,12 @@ if(!window.__biTradeBehaviourTimer){window.__biTradeBehaviourTimer=window.setInt
 if(!window.__biMultiTraderTimer){window.__biMultiTraderTimer=window.setInterval(function(){const v=document.getElementById('view-multi-trader');if(v&&v.classList.contains('active')&&typeof loadMultiTrader==='function')loadMultiTrader(false).catch(function(e){console.error('Multi-Trader auto-refresh failed',e)})},60000)}
 '''
 js += "\n// BI_RESEARCH_PAGE_AUTO_REFRESH_V1\n" + auto_timers + "\n"
+# Reflect active ranking controls in the page summary so users can see which filter is being used.
+rank_meta_old = '$("#mt-table-meta").textContent=n(d.candidate_rows_returned,0)+" profiles evaluated · stability-first ranking";'
+rank_meta_new = '$("#mt-table-meta").textContent=n(d.candidate_rows_returned,0)+" profiles evaluated · "+String((d.settings&&d.settings.ranking_priority)||"STABILITY")+" priority · "+String((d.settings&&d.settings.evaluation_period)||"30D");'
+if rank_meta_old in js:
+    js=replace_once(js,rank_meta_old,rank_meta_new,"Multi-Trader active ranking summary")
+
 js_path.write_text(js)
 
 # ---------------------------------------------------------------------------
