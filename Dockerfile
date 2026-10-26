@@ -23,6 +23,9 @@ RUN apt-get update \
     && python /tmp/patches/inspect_runtime_contracts.py \
     && python -m py_compile /tmp/patches/apply_stability_coverage_ui.py \
     && python /tmp/patches/apply_stability_coverage_ui.py \
+    && python -m py_compile /tmp/patches/apply_memory_guard.py \
+    && python /tmp/patches/apply_memory_guard.py \
+    && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
     && apt-get autoremove -y \
