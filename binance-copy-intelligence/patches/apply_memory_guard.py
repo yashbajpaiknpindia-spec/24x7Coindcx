@@ -37,12 +37,20 @@ if "RESOURCE_GUARD_V1" not in app:
                 source_snapshot_wr={}
 '''
     new_collect = '''        tids=[t.id for t in traders]; grouped={i:[] for i in tids}; path_grouped={i:[] for i in tids}
-        position_counts={i:0 for i in tids}; closed_counts={i:0 for i in tids}
+        position_counts={i:0 for i in tids}; closed_counts={i:0 for i in tids}; audit_field_counts={i:0 for i in tids}
         period_counts={7:{},30:{},90:{},365:{}}; event_ranges={}
         if tids:
             # Count full stored history with SQL aggregates; don't load all rows into web-worker memory.
             for _tid,_count in db.execute(select(Position.trader_id,func.count(Position.id)).where(Position.trader_id.in_(tids)).group_by(Position.trader_id)):
                 position_counts[_tid]=int(_count or 0)
+            _audit_stmt=select(
+                Position.trader_id,
+                func.count(Position.opened_ms),func.count(Position.closed_ms),
+                func.count(Position.entry_price),func.count(Position.exit_price),func.count(Position.close_pnl),
+                func.count(Position.id).filter(Position.mae_pct.is_not(None),Position.mfe_pct.is_not(None))
+            ).where(Position.trader_id.in_(tids)).group_by(Position.trader_id)
+            for _row in db.execute(_audit_stmt):
+                audit_field_counts[_row[0]]=sum(int(_n or 0) for _n in _row[1:])
             closed_count_stmt=select(Position.trader_id,func.count(Position.id)).where(
                 Position.trader_id.in_(tids),Position.close_pnl.is_not(None),Position.closed_ms.is_not(None))
             if market_type=="SPOT":
@@ -99,6 +107,50 @@ if "RESOURCE_GUARD_V1" not in app:
             source_snapshot_wr={}
 '''
     app = replace_once(app, old_collect, new_collect, "memory-bounded multi-trader data collection")
+
+    # The upstream stability patch inserted the Spot-period filter before reasons=[]
+    # in _mt_report; that caused an UnboundLocalError on every Spot evaluation.
+    early_spot_block = '''            if market_type=="SPOT":
+                # Verified Spot source supports 30D/90D/180D/365D, not a verified 7D metric.
+                # Evaluate Spot on 30D fields rather than excluding every Spot profile.
+                reasons=[r for r in reasons if r not in ("MISSING_SOURCE_7D_ROI","MISSING_SOURCE_7D_MDD","RECENT_ROI_BELOW_FLOOR","7D_MDD_LIMIT_EXCEEDED")]
+                if roi30 is None:
+                    reasons.append("MISSING_SOURCE_30D_ROI")
+                elif roi30 < min_roi_7d:
+                    reasons.append("RECENT_30D_ROI_BELOW_FLOOR")
+            evidence_gaps=[]
+'''
+    app = replace_once(app, early_spot_block, "            evidence_gaps=[]\\n", "move Spot criteria after reason initialization")
+    spot_reason_anchor = '''            elif pf<min_profit_factor: reasons.append("PROFIT_FACTOR_BELOW_FLOOR")
+            score=50+max(-20,min(20,roi7 or 0))*.7+max(-30,min(30,roi30 or 0))*.35+max(-50,min(50,roi90 or 0))*.1
+'''
+    spot_reason_new = '''            elif pf<min_profit_factor: reasons.append("PROFIT_FACTOR_BELOW_FLOOR")
+            # Apply Spot's supported 30-day evidence after reasons has been initialized.
+            if market_type=="SPOT":
+                reasons=[r for r in reasons if r not in ("MISSING_SOURCE_7D_ROI","MISSING_SOURCE_7D_MDD","RECENT_ROI_BELOW_FLOOR","7D_MDD_LIMIT_EXCEEDED")]
+                if roi30 is None:
+                    reasons.append("MISSING_SOURCE_30D_ROI")
+                elif roi30 < min_roi_7d:
+                    reasons.append("RECENT_30D_ROI_BELOW_FLOOR")
+            score=50+max(-20,min(20,roi7 or 0))*.7+max(-30,min(30,roi30 or 0))*.35+max(-50,min(50,roi90 or 0))*.1
+'''
+    app = replace_once(app, spot_reason_anchor, spot_reason_new, "apply Spot screening after reasons initialization")
+
+    audit_old = '''            audit_fields=(
+                sum(1 for p in all_positions if p.opened_ms is not None)
+                +sum(1 for p in all_positions if p.closed_ms is not None)
+                +sum(1 for p in all_positions if p.entry_price is not None)
+                +sum(1 for p in all_positions if p.exit_price is not None)
+                +sum(1 for p in all_positions if p.close_pnl is not None)
+                +sum(1 for p in all_positions if p.mae_pct is not None and p.mfe_pct is not None)
+            )
+            audit_coverage_pct=(100.0*audit_fields/(6.0*len(all_positions))) if all_positions else None
+'''
+    audit_new = '''            audit_fields=audit_field_counts.get(t.id,0)
+            audit_denominator=6.0*position_counts.get(t.id,0)
+            audit_coverage_pct=(100.0*audit_fields/audit_denominator) if audit_denominator else None
+'''
+    app = replace_once(app, audit_old, audit_new, "calculate audit coverage over full history")
 
     app = replace_once(
         app,
