@@ -26,6 +26,13 @@ def replace_section(text, start_marker, end_marker, replacement, label):
 # 1) Extend the Multi-Trader evidence set, then rank primarily on stability.
 # ---------------------------------------------------------------------------
 app = app_path.read_text()
+# Portfolio Lab's list API and Multi-Trader both read the newest saved win-rate snapshot.
+# The import used to live inside an optional API-patch branch, so it could be skipped
+# even though these routes were installed. Guarantee the alias at module scope here.
+if "from models import TraderSnapshot as pl_Snapshot" not in app:
+    app += "\nfrom models import TraderSnapshot as pl_Snapshot\n"
+    app_path.write_text(app)
+
 if "STABILITY_COVERAGE_METRICS_V1" not in app:
     app = replace_once(
         app,
