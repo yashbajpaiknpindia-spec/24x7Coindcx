@@ -6,7 +6,7 @@ html_path=root/"templates"/"index.html"
 html=html_path.read_text()
 
 if "BINANCE_INTEL_FRONTEND_RECOVERY_V1" not in html:
-    pattern=re.compile(r'(?P<tag><script\b[^>]*\bsrc\s*=\s*(?P<q>["\'])(?P<src>[^"\']*app\.js[^"\']*)(?P=q)[^>]*>\s*</script>)',re.I|re.S)
+    pattern=re.compile(r'(?P<tag><script\b[^>]*\bsrc\s*=\s*(?P<q>["\'])(?P<src>.*?app\.js.*?)(?P=q)[^>]*>\s*</script>)',re.I|re.S)
     matches=list(pattern.finditer(html))
     if len(matches)!=1:
         raise RuntimeError(f"Expected one app.js script to instrument; found {len(matches)}")
