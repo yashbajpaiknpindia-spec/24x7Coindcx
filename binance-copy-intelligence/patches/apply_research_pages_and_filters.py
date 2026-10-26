@@ -436,7 +436,7 @@ js_path.write_text(js)
 # ---------------------------------------------------------------------------
 html=html_path.read_text()
 if 'id="mt-min-win-rate"' not in html:
-    old_roi = '<label>Minimum ROI (%) in selected period<input id="mt-min-roi7" type="number" min="-100" max="100" value="-5"></label></div>'
+    old_roi = '<label>Minimum recent ROI (%) (30D Spot; 7D Futures)<input id="mt-min-roi7" type="number" min="-100" max="100" value="-5"></label></div>'
     if html.count(old_roi)!=1:
         raise RuntimeError(f"Cannot add rank filters: ROI control anchor count={html.count(old_roi)}")
     new_roi = old_roi + '''
