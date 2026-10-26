@@ -413,8 +413,8 @@ html = replace_table_inside_view(
 html = html.replace('id="pl-profile-rows"><tr><td colspan="9" class="empty-state">Loading profiles…</td></tr></tbody></table></div></article>',
                     'id="pl-profile-rows"><tr><td colspan="6" class="empty-state">Loading profiles…</td></tr></tbody></table></div><div class="table-pager"><button id="pl-profile-prev" class="btn secondary" disabled>← Previous</button><span id="pl-profile-page-meta">No rows</span><button id="pl-profile-next" class="btn secondary" disabled>Next →</button></div></article>',1)
 html = html.replace('id="pl-coverage-summary"', 'id="pl-coverage-summary"', 1)
-old_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\\n        <div class="kpi-grid">'
-new_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\\n        <div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage will be calculated from source-reported totals, stored records, audit fields and analysed trade paths.</div>\\n        <div class="kpi-grid">'
+old_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>'
+new_detail = old_detail + '<div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage will be calculated from source-reported totals, stored records, audit fields and analysed trade paths.</div>'
 if 'id="pl-coverage-summary"' not in html:
     html = replace_once(html, old_detail, new_detail, "selected profile coverage banner")
 
