@@ -410,6 +410,12 @@ if(!window.__biTradeBehaviourControlsWired){window.__biTradeBehaviourControlsWir
 if 'async function loadTradeBehaviour()' not in js:
     js += "\n" + behaviour_js + "\n"
 
+# Display the active priority score while keeping stability and confidence visible.
+score_cell_old = "n(t.stability_score,1)+'/100</b><small>'+esc(confidence)"
+score_cell_new = "n(t.priority_score!==undefined&&t.priority_score!==null?t.priority_score:t.stability_score,1)+'/100</b><small>'+esc(t.ranking_priority||'STABILITY')+' priority · stability '+n(t.stability_score,1)+'/100 · '+esc(confidence)"
+if score_cell_old in js:
+    js=replace_once(js,score_cell_old,score_cell_new,"Multi-Trader priority score display")
+
 # Ensure foreground data refreshes while a relevant page is open.
 js=js.replace("if(state.view==='history')loadPaths();","if(state.view==='history'){loadTradeBehaviour();loadPaths();}")
 js=js.replace("if(state.view==='traders')loadTraders();","if(state.view==='traders')loadTraders();if(state.view==='portfolio-lab')loadPortfolioLab(false);")
