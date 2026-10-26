@@ -27,6 +27,8 @@ RUN apt-get update \
     && python /tmp/patches/apply_memory_guard.py \
     && python -m py_compile /tmp/patches/apply_frontend_boot_recovery.py \
     && python /tmp/patches/apply_frontend_boot_recovery.py \
+    && python -m py_compile /tmp/patches/apply_frontend_navigation_failsafe.py \
+    && python /tmp/patches/apply_frontend_navigation_failsafe.py \
     && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
