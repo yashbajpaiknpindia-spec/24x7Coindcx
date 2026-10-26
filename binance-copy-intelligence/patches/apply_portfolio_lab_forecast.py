@@ -83,11 +83,23 @@ def pl_forecast():
                         'p10_pnl_usd':nums[int(.1*(len(nums)-1))],'p90_pnl_usd':nums[int(.9*(len(nums)-1))],
                         'expected_return_pct':(sum(nums)/len(nums))/capital*100})
             tail=forecasts[-1] if forecasts else {}
+            # Win rate must use realized PnL on verified closed rows. Do not
+            # convert Spot raw activity into wins/losses just because it has a timestamp.
+            verified_spot_kinds=("PAIRED_SPOT_TRADE","CLOSED_SPOT_TRADE","VERIFIED_SPOT_CLOSED_TRADE")
+            closed_rows=[p for p in grouped.get(t.id,[]) if p.opened_ms is not None and p.closed_ms is not None and p.close_pnl is not None and (market!="SPOT" or str(p.source_kind or "").upper() in verified_spot_kinds)]
+            closed_pnls=[float(p.close_pnl) for p in closed_rows]
+            closed_trade_win_rate_pct=(100.0*sum(1 for value in closed_pnls if value>0)/len(closed_pnls)) if closed_pnls else None
+            leverage_values=[float(p.leverage) for p in hist if p.leverage is not None and float(p.leverage)>0]
+            leverage_coverage_pct=(100.0*len(leverage_values)/len(hist)) if hist else None
             rows.append({'id':t.id,'nickname':t.nickname,'portfolio_id':t.portfolio_id,'market_type':t.market_type,
                 'profile_url':t.profile_url or ('https://www.binance.com/en/copy-trading/'+('spot' if market=='SPOT' else 'futures')+'/lead-details/'+str(t.portfolio_id)),
                 'source_roi':t.roi,'source_pnl':t.pnl,'source_mdd':t.mdd,'source_win_rate':t.win_rate,
                 'last_seen':t.last_seen.isoformat() if t.last_seen else None,'forecast_status':'READY' if ready else 'INSUFFICIENT_HISTORY',
-                'forecastable_trades':len(hist),'active_close_days':active,'observed_median_leverage':__import__('statistics').median([float(p.leverage) for p in hist if p.leverage is not None]) if any(p.leverage is not None for p in hist) else None,
+                'forecastable_trades':len(hist),'active_close_days':active,
+                'closed_trade_win_rate_pct':closed_trade_win_rate_pct,'closed_pnl_records':len(closed_pnls),
+                'closed_trade_win_rate_basis':'VERIFIED_CLOSED_PNL' if closed_pnls else ('NO_VERIFIED_SPOT_CLOSED_TRADES' if market=='SPOT' else 'NO_CLOSED_PNL_RECORDS'),
+                'observed_median_leverage':__import__('statistics').median(leverage_values) if leverage_values else None,
+                'observed_max_leverage':max(leverage_values) if leverage_values else None,'leverage_coverage_pct':leverage_coverage_pct,'leverage_sample_count':len(leverage_values),
                 'historical_modelled_profit_usd':sim['historical_profit_usd'],'historical_modelled_return_pct':sim['historical_return_pct'],
                 'historical_modelled_max_drawdown_usd':sim['historical_max_drawdown_usd'],'expected_horizon_profit_usd':tail.get('expected_pnl_usd'),
                 'median_horizon_profit_usd':tail.get('median_pnl_usd'),'p10_horizon_profit_usd':tail.get('p10_pnl_usd'),
