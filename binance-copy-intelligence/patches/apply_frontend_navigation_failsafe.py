@@ -17,6 +17,7 @@ if "BINANCE_INTEL_NAVIGATION_FAILSAFE_V2" not in html:
 <script id="BINANCE_INTEL_NAVIGATION_FAILSAFE_V2">
 (function(){
   "use strict";
+  window.__biNavFailsafe=true;
   var titles={
     "overview":"Overview","traders":"Trader universe","portfolio-lab":"Portfolio Lab",
     "multi-trader":"Multi-Trader Mode","history":"Trade behaviour",
@@ -77,7 +78,8 @@ if "BINANCE_INTEL_NAVIGATION_FAILSAFE_V2" not in html:
           if(typeof loadMTHistory==="function")called.push(await callRequired("Multi-Trader history",loadMTHistory));
           break;
         case "history":
-          called.push(await callRequired("Trade behaviour",function(){return loadPaths()}));
+          called.push(await callRequired("Trade behaviour portfolio ranking",function(){return loadTradeBehaviour()}));
+          if(typeof loadPaths==="function"){try{await Promise.resolve(loadPaths())}catch(e){try{console.warn("Legacy trade-path widget could not refresh",e)}catch(_){}}}
           break;
         case "system":
           called.push(await callRequired("Source & system",function(){return loadSystem()}));
