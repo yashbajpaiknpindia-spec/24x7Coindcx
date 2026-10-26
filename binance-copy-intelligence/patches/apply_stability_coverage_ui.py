@@ -362,42 +362,70 @@ else:
     html = html.replace("</head>", css + "\n</head>", 1)
 
 # Compact Multi-Trader ranking table: risk/behaviour first, detail available by Inspect.
-mt_match = re.search(r'<div class="table-scroll"><table><thead><tr>.*?</tr></thead><tbody id="mt-rows"', html, re.S)
-if not mt_match:
-    raise RuntimeError("Cannot locate Multi-Trader ranking table markup")
+def replace_table_inside_view(document, view_id, table_pattern, new_table, label):
+    # IMPORTANT: scope every generic table pattern to its owning <section class="view">.
+    # Without this guard, a previous page's similarly-shaped table can be matched and
+    # the regex can delete every whole page between that table and the intended tbody.
+    section_pattern = re.compile(
+        r'<section\\b(?=[^>]*\\bclass=["\\'][^"\\']*\\bview\\b[^"\\']*["\\'])(?=[^>]*\\bid=["\\']'
+        + re.escape(view_id) + r'["\\'])[^>]*>',
+        re.I
+    )
+    section_match = section_pattern.search(document)
+    if not section_match:
+        raise RuntimeError(f"Cannot locate owning view {view_id!r} for {label}")
+    section_end = document.find("</section>", section_match.end())
+    if section_end < 0:
+        raise RuntimeError(f"Cannot locate closing view tag for {view_id!r} ({label})")
+    section_end += len("</section>")
+    section_html = document[section_match.start():section_end]
+    table_match = re.search(table_pattern, section_html, re.S)
+    if not table_match:
+        raise RuntimeError(f"Cannot locate {label} inside owning view {view_id!r}")
+    section_html = section_html[:table_match.start()] + new_table + section_html[table_match.end():]
+    return document[:section_match.start()] + section_html + document[section_end:]
+
+
+# Multi-Trader table replacement is scoped to its own view; never let the match
+# start in the Trader universe or Overview and consume intervening view sections.
 mt_table = '<div class="table-scroll mt-ranking-scroll"><table class="compact-table"><thead><tr><th>Portfolio / recent ROI</th><th>Stability / confidence</th><th>MDD 7D / 30D / 365D</th><th>Typical / P90 adverse move</th><th>Source WR / closed WR</th><th>Records 7D / 30D / 90D</th><th>Path coverage</th><th>Decision / evidence gaps</th><th>Inspect</th></tr></thead><tbody id="mt-rows"'
-html = html[:mt_match.start()] + mt_table + html[mt_match.end():]
+html = replace_table_inside_view(
+    html, "view-multi-trader",
+    r'<div class="table-scroll"><table><thead><tr>.*?</tr></thead><tbody id="mt-rows"',
+    mt_table, "Multi-Trader ranking table"
+)
 html = html.replace('id="mt-rows"><tr><td colspan="14" class="empty-state">No evaluation yet.</td></tr></tbody></table></div></article>',
                     'id="mt-rows"><tr><td colspan="9" class="empty-state">No evaluation yet.</td></tr></tbody></table></div><div class="table-pager"><button id="mt-prev-page" class="btn secondary" disabled>← Previous</button><span id="mt-page-meta">No rows</span><button id="mt-next-page" class="btn secondary" disabled>Next →</button></div></article>',1)
 
-# Forecast ranking is now seven compact columns; source and observed closed win-rates remain distinct.
-pl_rank_match = re.search(r'<table><thead><tr>.*?</tr></thead><tbody id="pl-rank-rows"', html, re.S)
-if not pl_rank_match:
-    raise RuntimeError("Cannot locate Portfolio Lab forecast table")
+# All three Portfolio Lab tables are independently scoped to the Portfolio Lab view.
 rank_table = '<table class="compact-table"><thead><tr><th>Portfolio / rank / win rates</th><th>Expected / median PnL</th><th>10th–90th percentile</th><th>Observed leverage / coverage</th><th>Historical modelled PnL</th><th>Historical max drawdown</th><th>Trades / inspect</th></tr></thead><tbody id="pl-rank-rows"'
-html = html[:pl_rank_match.start()] + rank_table + html[pl_rank_match.end():]
+html = replace_table_inside_view(
+    html, "view-portfolio-lab",
+    r'<table><thead><tr>.*?</tr></thead><tbody id="pl-rank-rows"',
+    rank_table, "Portfolio Lab forecast table"
+)
 html = html.replace('<td colspan="10" class="empty-state">Run a forecast', '<td colspan="7" class="empty-state">Run a forecast', 1)
 
-# Replace the nine-column saved-profile index with a compact coverage-first view.
-profile_match = re.search(r'<table><thead><tr><th>Portfolio</th>.*?</tr></thead><tbody id="pl-profile-rows"', html, re.S)
-if not profile_match:
-    raise RuntimeError("Cannot locate saved portfolio table")
 profile_table = '<table class="compact-table"><thead><tr><th>Portfolio / source</th><th>Source WR / closed WR</th><th>Stored / reported total · records by period</th><th>Trade-path coverage / typical adverse move</th><th>History period / status</th><th>Inspect</th></tr></thead><tbody id="pl-profile-rows"'
-html = html[:profile_match.start()] + profile_table + html[profile_match.end():]
+html = replace_table_inside_view(
+    html, "view-portfolio-lab",
+    r'<table><thead><tr><th>Portfolio</th>.*?</tr></thead><tbody id="pl-profile-rows"',
+    profile_table, "Portfolio Lab saved profile table"
+)
 html = html.replace('id="pl-profile-rows"><tr><td colspan="9" class="empty-state">Loading profiles…</td></tr></tbody></table></div></article>',
-                    'id="pl-profile-rows"><tr><td colspan="6" class="empty-state">Loading profiles…</td></tr></tbody></table></div><div class="table-pager"><button id="pl-profile-prev" class="btn secondary" disabled>← Previous</button><span id="pl-profile-page-meta">No rows</span><button id="pl-profile-next" class="btn secondary" disabled>Next →</button></div></article>', 1)
+                    'id="pl-profile-rows"><tr><td colspan="6" class="empty-state">Loading profiles…</td></tr></tbody></table></div><div class="table-pager"><button id="pl-profile-prev" class="btn secondary" disabled>← Previous</button><span id="pl-profile-page-meta">No rows</span><button id="pl-profile-next" class="btn secondary" disabled>Next →</button></div></article>',1)
 html = html.replace('id="pl-coverage-summary"', 'id="pl-coverage-summary"', 1)
-old_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\n        <div class="kpi-grid">'
-new_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\n        <div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage will be calculated from source-reported totals, stored records, audit fields and analysed trade paths.</div>\n        <div class="kpi-grid">'
+old_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\\n        <div class="kpi-grid">'
+new_detail = '<div id="pl-official-link" class="run-sub">Official portfolio link will appear here.</div>\\n        <div id="pl-coverage-summary" class="coverage-summary">Portfolio coverage will be calculated from source-reported totals, stored records, audit fields and analysed trade paths.</div>\\n        <div class="kpi-grid">'
 if 'id="pl-coverage-summary"' not in html:
     html = replace_once(html, old_detail, new_detail, "selected profile coverage banner")
 
-# The full trade table has nine columns, combining time/price/status facts to avoid horizontal scrolling.
-trade_match = re.search(r'<table><thead><tr>.*?</tr></thead><tbody id="pl-trade-rows"', html, re.S)
-if not trade_match:
-    raise RuntimeError("Cannot locate Portfolio Lab trade-history table")
 trade_table = '<table class="compact-table"><thead><tr><th>Entry → close time / status</th><th>Symbol / side</th><th>Entry → exit price</th><th>Leverage / margin</th><th>Closed PnL / ROI</th><th>Adverse / favourable move</th><th>Time to MAE / MFE</th><th>Path coverage / status</th><th>Scenario PnL</th></tr></thead><tbody id="pl-trade-rows"'
-html = html[:trade_match.start()] + trade_table + html[trade_match.end():]
+html = replace_table_inside_view(
+    html, "view-portfolio-lab",
+    r'<table><thead><tr>.*?</tr></thead><tbody id="pl-trade-rows"',
+    trade_table, "Portfolio Lab trade-history table"
+)
 html = html.replace('id="pl-trade-rows"><tr><td colspan="14" class="empty-state">Select a portfolio to load trades.</td></tr></tbody>',
                     'id="pl-trade-rows"><tr><td colspan="9" class="empty-state">Select a portfolio to load trades.</td></tr></tbody>',1)
 html_path.write_text(html)
