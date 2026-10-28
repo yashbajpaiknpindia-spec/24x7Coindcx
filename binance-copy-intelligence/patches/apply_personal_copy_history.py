@@ -217,19 +217,27 @@ def _pc_import_records(reader, source_kind, market_type, strategy_name):
 
 def _pc_api_it_tax_import():
     f = request.files.get("file")
-    if not f:
-        return jsonify({"error": "Choose a Binance Copy Trading or account-history CSV export first."}), 400
-    raw = f.read(10000001)
-    if len(raw) > 10000000:
-        return jsonify({"error": "CSV is larger than 10 MB. Export a shorter date range."}), 413
+    pasted = str(request.form.get("pasted_history") or "")
+    if not f and not pasted.strip():
+        return jsonify({"error": "Upload a Binance Copy Trading CSV or paste the copied history table first."}), 400
+    if f:
+        raw = f.read(10000001)
+        if len(raw) > 10000000:
+            return jsonify({"error": "History import is larger than 10 MB. Export a shorter date range."}), 413
+        try:
+            decoded = raw.decode("utf-8-sig")
+        except Exception:
+            return jsonify({"error": "History must be UTF-8. Re-export it from Binance and try again."}), 400
+    else:
+        decoded = pasted.lstrip("\ufeff")
+        if len(decoded.encode("utf-8")) > 10000000:
+            return jsonify({"error": "Pasted history is larger than 10 MB. Paste a shorter date range."}), 413
     try:
-        decoded = raw.decode("utf-8-sig")
-    except Exception:
-        return jsonify({"error": "CSV must be UTF-8. Re-export it from Binance and try again."}), 400
-    try:
-        reader = _pc_csv.DictReader(_pc_io.StringIO(decoded))
+        first_line = next((line for line in decoded.splitlines() if line.strip()), "")
+        delimiter = "\t" if first_line.count("\t") >= first_line.count(",") and first_line.count("\t") > 0 else ","
+        reader = _pc_csv.DictReader(_pc_io.StringIO(decoded), delimiter=delimiter)
         if not reader.fieldnames:
-            return jsonify({"error": "CSV headers were not found."}), 400
+            return jsonify({"error": "History table headers were not found. Copy the header row along with the data."}), 400
         kind = str(request.form.get("source_kind") or "COPY_PORTFOLIO_HISTORY").upper()
         market = str(request.form.get("market_type") or "FUTURES").upper()
         if market not in ("SPOT", "FUTURES"):
@@ -271,13 +279,13 @@ app.view_functions["api_it_tax_import"] = _pc_api_it_tax_import
 html = HTML.read_text()
 html = html.replace("<h3>Upload realised-PnL CSV</h3>", "<h3>Upload Personal Copy History / PnL CSV</h3>")
 old = '<div class="field-row"><label>Market<select id="pt-market-csv"><option value="FUTURES">Futures</option><option value="SPOT">Spot</option></select></label><label>Binance CSV file<input id="pt-csv" type="file" accept=".csv,text/csv"></label></div>'
-new = '<div class="field-row"><label>Data source<select id="pt-source-kind"><option value="FUTURES_COPY_TRADE_HISTORY">Futures Copy Trading · trade history</option><option value="SPOT_COPY_TRADE_HISTORY">Spot Copy Trading · trade history</option><option value="COPY_PORTFOLIO_HISTORY" selected>Copy portfolio history · auto-detect</option><option value="COPY_PROFIT_SHARING">Copy profit sharing</option><option value="COPY_BALANCE_HISTORY">Copy balance history</option><option value="ACCOUNT_PNL_CSV">Standard account PnL / income</option></select></label><label>Market<select id="pt-market-csv"><option value="FUTURES">Futures</option><option value="SPOT">Spot</option></select></label><label>Binance CSV file<input id="pt-csv" type="file" accept=".csv,text/csv"></label></div>'
+new = '<div class="field-row"><label>Data source<select id="pt-source-kind"><option value="FUTURES_COPY_TRADE_HISTORY">Futures Copy Trading · trade history</option><option value="SPOT_COPY_TRADE_HISTORY">Spot Copy Trading · trade history</option><option value="COPY_PORTFOLIO_HISTORY" selected>Copy portfolio history · auto-detect</option><option value="COPY_PROFIT_SHARING">Copy profit sharing</option><option value="COPY_BALANCE_HISTORY">Copy balance history</option><option value="ACCOUNT_PNL_CSV">Standard account PnL / income</option></select></label><label>Market<select id="pt-market-csv"><option value="FUTURES">Futures</option><option value="SPOT">Spot</option></select></label><label>Binance CSV file<input id="pt-csv" type="file" accept=".csv,text/csv"></label></div><label>Or paste copied Binance history table<textarea id="pt-pasted-history" rows="5" placeholder="Copy the table headers and rows from Binance Copy Trading history, then paste here. Tabs between columns are supported."></textarea></label>'
 if old in html:
     html = html.replace(old, new, 1)
 elif 'id="pt-source-kind"' not in html:
     raise RuntimeError("Could not find CSV upload field row to extend for Personal Copy History")
 old_help = "Use a Binance realised PnL / income-history export with an income type and income amount, or a trade ledger that includes a realised/closed PnL column. Raw spot fills without acquisition cost and disposal proceeds are not enough for a reliable taxable-gain calculation. Duplicate rows are deduplicated."
-new_help = "Import your personal Copy Trading exports here. In Binance, open Copy Trading → Copy Overview (Futures) or the Spot Copy Trading portfolio → Portfolio History, then export the Trade History, Profit Sharing, or Balance History available there. Choose the matching source type above. Copy Trading and standard-account history are separate. The API key still syncs standard Futures income; this importer handles your personal copy portfolio records. Spot trade fills without cost basis are stored but are not treated as realised profit. Duplicate rows are deduplicated."
+new_help = "Import personal Copy Trading history here. Open Binance Copy Trading → Copy Overview (Futures) or your Spot Copy Trading portfolio → Portfolio History, then either upload a CSV export or copy the table with its header row and paste it above. Choose the matching source type. Copy Trading and standard-account history are separate; the API key syncs standard Futures income, not personal copy-portfolio history. Spot fills without cost basis are stored as trade history and are not treated as realised profit. Duplicate rows are deduplicated."
 if old_help in html:
     html = html.replace(old_help, new_help, 1)
 # Also make the data-scope limitation visible rather than implying the key sync imports copy history.
@@ -303,6 +311,14 @@ HTML.write_text(html)
 
 js = JS.read_text()
 if "BI_PERSONAL_COPY_HISTORY_UI_V1" not in js:
+    old_gate = "const file=$('#pt-csv').files&&$('#pt-csv').files[0];if(!file){toast('Choose a CSV file first.','error');return}"
+    new_gate = "const file=$('#pt-csv').files&&$('#pt-csv').files[0];const pasted=$('#pt-pasted-history')?$('#pt-pasted-history').value.trim():'';if(!file&&!pasted){toast('Choose a CSV file or paste a copied Binance history table first.','error');return}"
+    if old_gate not in js: raise RuntimeError("Could not find CSV upload gate in app.js")
+    js = js.replace(old_gate,new_gate,1)
+    old_form = "const form=new FormData();form.append('file',file);"
+    new_form = "const form=new FormData();if(file)form.append('file',file);if(pasted)form.append('pasted_history',pasted);"
+    if old_form not in js: raise RuntimeError("Could not find CSV FormData file append in app.js")
+    js = js.replace(old_form,new_form,1)
     old = "form.append('market_type',$('#pt-market-csv').value);form.append('strategy_name',$('#pt-strategy-csv').value.trim());"
     new = "form.append('market_type',$('#pt-market-csv').value);form.append('source_kind',$('#pt-source-kind')?$('#pt-source-kind').value:'COPY_PORTFOLIO_HISTORY');form.append('strategy_name',$('#pt-strategy-csv').value.trim());"
     if old not in js:
@@ -329,6 +345,7 @@ if "BI_PERSONAL_COPY_HISTORY_UI_V1" not in js:
     if marker in js:
         js = js.replace(marker, helper + "\n" + marker, 1)
     js += "\n// BI_PERSONAL_COPY_HISTORY_IMPORT_V1\n"
+    js = js.replace("$('#pt-csv').value=''}catch(e){toast('CSV import failed: '+e.message,'error')}", "$('#pt-csv').value='';if($('#pt-pasted-history'))$('#pt-pasted-history').value=''}catch(e){toast('Copy history import failed: '+e.message,'error')}", 1)
     JS.write_text(js)
 
-print("Installed Personal Copy History CSV ingestion, dedupe, source attribution, and a distinct UI path.")
+print("Installed Personal Copy History CSV/paste ingestion, dedupe, source attribution, and a distinct UI path.")
