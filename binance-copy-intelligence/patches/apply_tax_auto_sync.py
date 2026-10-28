@@ -22,7 +22,7 @@ import threading as _bi_tax_threading
 import time as _bi_tax_worker_time
 import os as _bi_tax_os
 
-_BI_TAX_SYNC_LOCK = _bi_tax_threading.Lock()
+_BI_TAX_SYNC_LOCK = _bi_tax_threading.RLock()
 _BI_TAX_SYNC_STATE = {
     "status": "WAITING",
     "last_attempt_utc": None,
