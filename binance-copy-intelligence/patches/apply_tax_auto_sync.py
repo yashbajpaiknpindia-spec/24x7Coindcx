@@ -171,12 +171,30 @@ if "BI_TAX_SYNC_STATUS_UI_V1" not in js:
 # The patches that add pages also rewrite the cache key before this patch runs.
 # Bump it again after modifying app.js so browsers don't keep the old tax status UI.
 html = HTML.read_text()
-html, cache_count = _bi_tax_re.subn(
-    r"""(src=['"][^'"]*app\.js\?v=)[^'"]+""",
-    r'\g<1>bi-frontend-20261028-personal-sync3',
-    html,
-    count=1,
-)
+cache_count = 0
+scan_from = 0
+while True:
+    script_start = html.find("<script", scan_from)
+    if script_start < 0:
+        break
+    tag_end = html.find(">", script_start)
+    src_pos = html.find("src=", script_start, tag_end)
+    if tag_end < 0 or src_pos < 0:
+        scan_from = tag_end + 1 if tag_end >= 0 else len(html)
+        continue
+    quote = html[src_pos + 4:src_pos + 5]
+    value_start = src_pos + 5
+    value_end = html.find(quote, value_start)
+    if value_end < 0:
+        raise RuntimeError("Malformed script src attribute while cache-busting app.js")
+    src_value = html[value_start:value_end]
+    if "app.js" in src_value:
+        base_src = src_value.split("?v=", 1)[0].split("?", 1)[0]
+        replacement_src = base_src + "?v=bi-frontend-20261028-personal-sync3"
+        html = html[:value_start] + replacement_src + html[value_end:]
+        cache_count = 1
+        break
+    scan_from = tag_end + 1
 if cache_count != 1:
     raise RuntimeError("Could not cache-bust final app.js asset after personal sync UI update")
 HTML.write_text(html)
