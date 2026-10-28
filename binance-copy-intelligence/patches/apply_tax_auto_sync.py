@@ -23,6 +23,13 @@ import time as _bi_tax_worker_time
 import os as _bi_tax_os
 import json as _bi_tax_json
 import re as _bi_tax_re
+import time as _bi_conn_time
+import hmac as _bi_conn_hmac
+import hashlib as _bi_conn_hashlib
+import json as _bi_conn_json
+import urllib.parse as _bi_conn_parse
+import urllib.request as _bi_conn_request
+import urllib.error as _bi_conn_error
 
 _BI_TAX_SYNC_LOCK = _bi_tax_threading.RLock()
 _BI_TAX_SYNC_STATE = {
@@ -36,6 +43,15 @@ _BI_TAX_SYNC_STATE = {
     "lookback_days": 90,
     "error": None,
     "source": "Binance USD-M Futures income history",
+    "connection_check": {
+        "status": "NOT_RUN",
+        "checked_at_utc": None,
+        "spot_read": {"status": "NOT_RUN"},
+        "futures_read": {"status": "NOT_RUN"},
+        "api_restrictions": {"status": "NOT_RUN"},
+        "copy_history": {"status": "NOT_VERIFIED",
+                         "note": "Spot/Futures account authentication is not a Copy Trading portfolio-history feed."},
+    },
 }
 
 def _bi_tax_utc_now():
@@ -44,6 +60,110 @@ def _bi_tax_utc_now():
 def _bi_tax_set_state(**values):
     with _BI_TAX_SYNC_LOCK:
         _BI_TAX_SYNC_STATE.update(values)
+
+def _bi_tax_signed_probe(base_url, path, key, secret):
+    """Call one signed read endpoint; return a minimal diagnostic, never raw account data."""
+    params = {"timestamp": int(_bi_conn_time.time() * 1000), "recvWindow": 5000}
+    query = _bi_conn_parse.urlencode(params)
+    signature = _bi_conn_hmac.new(secret.encode("utf-8"), query.encode("utf-8"), _bi_conn_hashlib.sha256).hexdigest()
+    url = base_url + path + "?" + query + "&signature=" + signature
+    req = _bi_conn_request.Request(
+        url,
+        headers={"X-MBX-APIKEY": key, "Accept": "application/json", "User-Agent": "Binance-Intel-ReadOnly-Connection-Check"},
+        method="GET",
+    )
+    status_code = None
+    payload = None
+    try:
+        with _bi_conn_request.urlopen(req, timeout=10) as response:
+            status_code = int(response.status)
+            payload = _bi_conn_json.loads(response.read(2_000_000).decode("utf-8", "replace"))
+    except _bi_conn_error.HTTPError as exc:
+        status_code = int(exc.code)
+        try:
+            payload = _bi_conn_json.loads(exc.read(100_000).decode("utf-8", "replace"))
+        except Exception:
+            payload = None
+    except Exception as exc:
+        return {"status": "ERROR", "http_status": None, "api_code": None,
+                "reason": "Network request failed (" + type(exc).__name__ + ")."}, None
+    api_code = payload.get("code") if isinstance(payload, dict) else None
+    try:
+        code_int = int(api_code) if api_code is not None else None
+    except Exception:
+        code_int = None
+    rejected = isinstance(payload, dict) and code_int is not None and code_int < 0
+    if status_code is not None and 200 <= status_code < 300 and not rejected:
+        return {"status": "PASS", "http_status": status_code, "api_code": None,
+                "reason": "Authenticated read request succeeded."}, payload
+    safe_reasons = {
+        -2015: "Invalid API key, IP restriction, or endpoint permission.",
+        -2014: "API key format was rejected.",
+        -1022: "Signature verification failed. Check the API secret and request signing.",
+        -1021: "Request timestamp was outside Binance recvWindow. Check server clock.",
+        -1003: "Binance rate limit reached; retry later.",
+    }
+    reason = safe_reasons.get(code_int, "Binance rejected the signed request.")
+    if status_code in (418, 429):
+        reason = "Binance rate limit or temporary IP block; retry later."
+    return {"status": "FAIL", "http_status": status_code, "api_code": code_int, "reason": reason}, None
+
+
+def _bi_tax_verify_binance_connection():
+    key = str(_bi_tax_os.getenv("BINANCE_API_KEY") or "").strip()
+    secret = str(_bi_tax_os.getenv("BINANCE_API_SECRET") or "").strip()
+    checked = _bi_tax_utc_now()
+    if not key or not secret:
+        result = {
+            "status": "MISSING_CREDENTIALS", "checked_at_utc": checked,
+            "spot_read": {"status": "SKIPPED", "reason": "Server credentials are missing."},
+            "futures_read": {"status": "SKIPPED", "reason": "Server credentials are missing."},
+            "api_restrictions": {"status": "SKIPPED", "reason": "Server credentials are missing."},
+            "copy_history": {"status": "NOT_VERIFIED", "note": "Copy Trading portfolio history is a separate data scope."},
+        }
+        _bi_tax_set_state(connection_check=result)
+        return result
+
+    # Official signed account and key-permissions endpoints. Only tiny booleans are
+    # extracted from payloads; balance arrays, positions and raw responses are discarded.
+    restrictions, restriction_payload = _bi_tax_signed_probe(
+        "https://api.binance.com", "/sapi/v1/account/apiRestrictions", key, secret
+    )
+    if restrictions.get("status") == "PASS" and isinstance(restriction_payload, dict):
+        restrictions.update({
+            "read_enabled": bool(restriction_payload.get("enableReading")),
+            "ip_restricted": bool(restriction_payload.get("ipRestrict")),
+            "spot_trading_permission_enabled": bool(restriction_payload.get("enableSpotAndMarginTrading")),
+            "futures_trading_permission_enabled": bool(restriction_payload.get("enableFutures")),
+            "withdrawal_permission_enabled": bool(restriction_payload.get("enableWithdrawals")),
+        })
+    spot, spot_payload = _bi_tax_signed_probe("https://api.binance.com", "/api/v3/account", key, secret)
+    if spot.get("status") == "PASS":
+        spot["account_read_verified"] = isinstance(spot_payload, dict) and ("balances" in spot_payload or "accountType" in spot_payload)
+    futures, futures_payload = _bi_tax_signed_probe("https://fapi.binance.com", "/fapi/v2/account", key, secret)
+    if futures.get("status") == "PASS":
+        futures["account_read_verified"] = isinstance(futures_payload, dict) and ("assets" in futures_payload or "positions" in futures_payload)
+    spot_ok = bool(spot.get("status") == "PASS" and spot.get("account_read_verified"))
+    futures_ok = bool(futures.get("status") == "PASS" and futures.get("account_read_verified"))
+    status = "VERIFIED" if spot_ok and futures_ok else ("PARTIAL" if spot_ok or futures_ok else "FAILED")
+    result = {
+        "status": status, "checked_at_utc": checked,
+        "spot_read": spot, "futures_read": futures, "api_restrictions": restrictions,
+        "copy_history": {
+            "status": "NOT_VERIFIED",
+            "note": "Successful Spot/Futures account reads do not prove that official API endpoints expose personal Copy Trading portfolio history. No undocumented browser-session endpoints are used.",
+        },
+    }
+    _bi_tax_set_state(connection_check=result)
+    app.logger.info("binance_connection_check status=%s spot=%s futures=%s restrictions=%s copy_history=not_verified",
+                    status, spot.get("status"), futures.get("status"), restrictions.get("status"))
+    return result
+
+
+@app.post("/api/binance/connection-check")
+def api_bi_binance_connection_check():
+    return jsonify({"connection_check": _bi_tax_verify_binance_connection()})
+
 
 def _bi_tax_sync_from_environment(trigger="startup"):
     key = str(_bi_tax_os.getenv("BINANCE_API_KEY") or "").strip()
@@ -61,12 +181,14 @@ def _bi_tax_sync_from_environment(trigger="startup"):
     _bi_tax_set_state(status="RUNNING", last_attempt_utc=attempted, error=None)
     try:
         days = max(1, min(90, int(_bi_tax_os.getenv("BI_TAX_SYNC_LOOKBACK_DAYS", "90"))))
-        # Exercise the same signed route used by the page. The endpoint prefers the
-        # environment values and accepts no credentials from this internal request.
-        # Call the same Flask view directly inside a request context. Using
-        # app.test_client() here runs the browser-login before_request gate and
-        # returns the app's own HTTP 401 before Binance is contacted.
+        # Test signed Spot/Futures account reads first. The build smoke test stubs
+        # this function so no external/private calls happen during image builds.
+        _bi_tax_verify_binance_connection()
+        # Supply environment secrets only to this in-process view call. They are not
+        # sent to the browser, persisted, or logged by the sync worker.
         with app.test_request_context("/api/profit-tax/sync", method="POST", json={
+            "api_key": key,
+            "api_secret": secret,
             "lookback_days": days,
             "strategy_name": "Unattributed Binance Futures",
             "trigger": trigger,
@@ -107,8 +229,8 @@ def api_it_tax_sync_status():
         snapshot = dict(_BI_TAX_SYNC_STATE)
     snapshot["api_key_configured"] = bool(_bi_tax_os.getenv("BINANCE_API_KEY"))
     snapshot["api_secret_configured"] = bool(_bi_tax_os.getenv("BINANCE_API_SECRET"))
-    snapshot["credentials_validated_by_binance"] = snapshot["status"] in ("SUCCEEDED", "SUCCEEDED_NO_RECORDS")
-    snapshot["scope_note"] = "Read-only USD-M Futures income events only; Spot per-symbol fills are not included in this API sync."
+    snapshot["credentials_validated_by_binance"] = snapshot.get("connection_check", {}).get("status") in ("VERIFIED", "PARTIAL")
+    snapshot["scope_note"] = "Live diagnostic tests signed Spot and USD-M Futures account reads. Income history is separate and is not a complete personal Copy Trading history feed."
     return jsonify(snapshot)
 
 def _bi_tax_sync_worker_loop():
@@ -141,7 +263,8 @@ if "This read-only sync imports USD-M Futures income events." not in html:
     anchor = '<span id="pt-env-status">Checking service configuration…</span>'
     if html.count(anchor) != 1:
         raise RuntimeError("Cannot find unique tax credential status element for sync-scope note")
-    html = html.replace(anchor, anchor + '<p class="help-text">' + scope_note + '</p>', 1)
+    diagnostic_ui = '<div class="button-row" style="margin-top:10px"><button type="button" class="btn secondary" id="bi-connection-check">Test live Binance connection</button><span id="bi-connection-result" class="help-text">Connection not yet verified.</span></div>'
+    html = html.replace(anchor, anchor + '<p class="help-text">' + scope_note + '</p>' + diagnostic_ui, 1)
 # The background worker now owns automatic sync; page navigation only reads
 # status and summaries to avoid launching a second, concurrent signed request.
 html = html.replace("await itLoadProfitTax(true);", "await itLoadProfitTax(false);")
@@ -160,12 +283,44 @@ if "BI_TAX_SYNC_STATUS_UI_V1" not in js:
    const el=$('#pt-env-status');
    const syncLabel=sync?(' · personal Futures sync: '+String(sync.status||'unknown').replaceAll('_',' ').toLowerCase()+(sync.records_received!==undefined?' · '+Number(sync.records_received||0)+' API rows / '+Number(sync.records_fetched||0)+' PnL-fee-funding rows':'')):'';
    if(el)el.textContent=(ready?'Configured on the server · values hidden':'Missing BINANCE_API_KEY or BINANCE_API_SECRET in Render service environment')+syncLabel;
+   const cc=sync&&sync.connection_check;
+   const result=$('#bi-connection-result');
+   if(result&&cc)result.textContent='API access: '+String(cc.status||'unknown')+' · Spot read: '+String((cc.spot_read||{}).status||'unknown')+' · Futures read: '+String((cc.futures_read||{}).status||'unknown')+' · Copy history: not yet verified';
    if(sync&&sync.status==='FAILED'){
-     const warning=$('#pt-warning');if(warning)warning.textContent='Automatic Binance Futures account sync failed: '+String(sync.error||'See Render logs')+'. Credentials are present, but Binance must accept their signature and permissions. Spot fills are outside this sync.';
+     const warning=$('#pt-warning');if(warning)warning.textContent='Automatic Binance Futures account sync failed: '+String(sync.error||'See Render logs')+'. Review the live connection test. Spot fills and Copy Trading portfolio history are separate data scopes.';
    }"""
     if js.count(old) != 1:
         raise RuntimeError("Cannot find unique credentials status client function anchor")
-    js = js.replace(old, new, 1) + "\n// BI_TAX_SYNC_STATUS_UI_V1\n"
+    js = js.replace(old, new, 1)
+    js += r"""
+// BI_TAX_SYNC_STATUS_UI_V2
+async function biRunBinanceConnectionCheck(){
+ const button=$('#bi-connection-check'), output=$('#bi-connection-result');
+ if(!button||!output)return;
+ button.disabled=true;button.textContent='Testing signed API access…';
+ output.textContent='Checking signed API permissions, Spot read access and Futures read access. No trades or transfers are requested.';
+ try{
+   const response=await api('/api/binance/connection-check',{method:'POST',body:JSON.stringify({})});
+   const c=response.connection_check||{};
+   const reason=x=>String((x||{}).reason||((x||{}).status)||'unknown');
+   output.textContent='Overall: '+String(c.status||'unknown')+
+     ' | Spot read: '+String((c.spot_read||{}).status||'unknown')+' — '+reason(c.spot_read)+
+     ' | Futures read: '+String((c.futures_read||{}).status||'unknown')+' — '+reason(c.futures_read)+
+     ' | API restrictions: '+String((c.api_restrictions||{}).status||'unknown')+
+     ' | Personal Copy Trading history: NOT VERIFIED by these account endpoints.';
+   if(typeof itCheckEnvCredentials==='function')await itCheckEnvCredentials();
+   toast(c.status==='VERIFIED'?'Binance Spot and Futures read access verified; Copy Trading history is a separate check.':c.status==='PARTIAL'?'Partial Binance read access verified. Check endpoint details.':'Connection test completed; inspect the per-endpoint results.','info');
+ }catch(e){output.textContent='Connection test could not complete: '+e.message;toast('Connection test failed: '+e.message,'error')}
+ finally{button.disabled=false;button.textContent='Test live Binance connection'}
+}
+if(!window.__biConnectionCheckWired){
+ window.__biConnectionCheckWired=true;
+ document.addEventListener('click',function(event){
+   const target=event.target&&event.target.closest?event.target.closest('#bi-connection-check'):null;
+   if(target)biRunBinanceConnectionCheck();
+ });
+}
+"""
     JS.write_text(js)
 
 # The patches that add pages also rewrite the cache key before this patch runs.
@@ -190,7 +345,7 @@ while True:
     src_value = html[value_start:value_end]
     if "app.js" in src_value:
         base_src = src_value.split("?v=", 1)[0].split("?", 1)[0]
-        replacement_src = base_src + "?v=bi-frontend-20261028-personal-sync3"
+        replacement_src = base_src + "?v=bi-frontend-20261028-connection-check1"
         html = html[:value_start] + replacement_src + html[value_end:]
         cache_count = 1
         break
