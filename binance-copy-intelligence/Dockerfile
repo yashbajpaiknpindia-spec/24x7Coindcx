@@ -31,6 +31,8 @@ RUN apt-get update \
     && python /tmp/patches/limit_dual_investment_settlement_horizon.py \
     && python -m py_compile /tmp/patches/add_dual_investment_p01_tail_gate.py \
     && python /tmp/patches/add_dual_investment_p01_tail_gate.py \
+    && python -m py_compile /tmp/patches/refresh_dual_investment_lab_ui.py \
+    && python /tmp/patches/refresh_dual_investment_lab_ui.py \
     && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
