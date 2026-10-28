@@ -291,7 +291,7 @@ if 'id="pt-api-key"' in html or 'id="pt-api-secret"' in html:
     raise AssertionError("UI smoke failed: manual API credential inputs remain")
 if "pt-env-status" not in html or "Configured on the server" not in js:
     raise AssertionError("UI smoke failed: server-managed credential status is missing")
-if "personal Futures sync" not in js or "Spot per-symbol fills" not in html:
+if "personal Futures sync" not in js or "Spot fills" not in html:
     raise AssertionError("UI smoke failed: personal account sync status/scope diagnostics are missing")
 if 'await itLoadProfitTax(true);' in html or 'function(){return itLoadProfitTax(true)}' in html:
     raise AssertionError("UI smoke failed: page navigation can trigger a duplicate signed account sync")
