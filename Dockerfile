@@ -37,12 +37,16 @@ RUN apt-get update \
     && python /tmp/patches/apply_copier_forecast_gate.py \
     && python -m py_compile /tmp/patches/apply_profit_tax_centre.py \
     && python /tmp/patches/apply_profit_tax_centre.py \
+    && python -m py_compile /tmp/patches/apply_page_reliability_fixes.py \
+    && python /tmp/patches/apply_page_reliability_fixes.py \
     && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
     && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* /tmp/bundle /tmp/patches \
-    && pip install --no-cache-dir -r /app/requirements.txt
+    && rm -rf /var/lib/apt/lists/* /tmp/bundle \
+    && pip install --no-cache-dir -r /app/requirements.txt \
+    && python /tmp/patches/verify_page_reliability.py \
+    && rm -rf /tmp/patches
 EXPOSE 10000
 CMD ["sh", "-c", "gunicorn app:app --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:${PORT:-10000}"]
 
