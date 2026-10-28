@@ -59,12 +59,16 @@ def _bi_tax_sync_from_environment(trigger="startup"):
         days = max(1, min(90, int(_bi_tax_os.getenv("BI_TAX_SYNC_LOOKBACK_DAYS", "90"))))
         # Exercise the same signed route used by the page. The endpoint prefers the
         # environment values and accepts no credentials from this internal request.
-        with app.test_client() as client:
-            response = client.post("/api/profit-tax/sync", json={
-                "lookback_days": days,
-                "strategy_name": "Unattributed Binance Futures",
-                "trigger": trigger,
-            })
+        # Call the same Flask view directly inside a request context. Using
+        # app.test_client() here runs the browser-login before_request gate and
+        # returns the app's own HTTP 401 before Binance is contacted.
+        with app.test_request_context("/api/profit-tax/sync", method="POST", json={
+            "lookback_days": days,
+            "strategy_name": "Unattributed Binance Futures",
+            "trigger": trigger,
+        }):
+            route_result = api_it_tax_sync()
+            response = app.make_response(route_result)
             payload = response.get_json(silent=True) or {}
         attempted = _bi_tax_utc_now()
         if response.status_code == 200 and not payload.get("error"):
