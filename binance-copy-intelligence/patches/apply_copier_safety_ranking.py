@@ -235,15 +235,18 @@ if "COPIER_SAFETY_RANKING_V1" not in app:
             reasons.extend(copier_safety_reasons)
 """, 1)
 
-    score_anchor = '            _adjusted_stability=(max(0,min(100,stability_score*(0.5+0.5*stability_confidence/100.0))) if stability_score is not None else None)'
+    # Place copier weighting after the selected priority score has actually been
+    # computed. The former anchor was above the if/elif assigning _priority_score,
+    # which caused UnboundLocalError on every candidate evaluation.
+    score_anchor = '                _priority_score=_adjusted_stability if _adjusted_stability is not None else score'
     if fn.count(score_anchor) != 1:
-        raise RuntimeError("Cannot locate unique Multi-Trader priority-score anchor: " + str(fn.count(score_anchor)))
+        raise RuntimeError("Cannot locate final Multi-Trader priority-score assignment: " + str(fn.count(score_anchor)))
     fn = fn.replace(score_anchor, score_anchor + """
             _base_priority = _priority_score
             _pnl_rank = copier_safety.get("copier_pnl_score")
             _duration_rank = copier_safety.get("duration_score")
             _safety_score = (0.45 * float(_base_priority) + 0.35 * float(_pnl_rank) + 0.20 * float(_duration_rank)) if (_base_priority is not None and _pnl_rank is not None and _duration_rank is not None) else None
-            _priority_score = round(_safety_score, 2) if _safety_score is not None else None
+            _priority_score = round(_safety_score, 2) if _safety_score is not None else _base_priority
 """, 1)
 
     row_anchor = '"last_seen":_iso(t.last_seen),'
