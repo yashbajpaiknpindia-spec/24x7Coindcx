@@ -136,6 +136,8 @@ def _bi_tax_verify_binance_connection():
             "spot_trading_permission_enabled": bool(restriction_payload.get("enableSpotAndMarginTrading")),
             "futures_trading_permission_enabled": bool(restriction_payload.get("enableFutures")),
             "withdrawal_permission_enabled": bool(restriction_payload.get("enableWithdrawals")),
+            "internal_transfer_permission_enabled": bool(restriction_payload.get("enableInternalTransfer")),
+            "universal_transfer_permission_enabled": bool(restriction_payload.get("permitsUniversalTransfer")),
         })
     spot, spot_payload = _bi_tax_signed_probe("https://api.binance.com", "/api/v3/account", key, secret)
     if spot.get("status") == "PASS":
@@ -146,8 +148,23 @@ def _bi_tax_verify_binance_connection():
     spot_ok = bool(spot.get("status") == "PASS" and spot.get("account_read_verified"))
     futures_ok = bool(futures.get("status") == "PASS" and futures.get("account_read_verified"))
     status = "VERIFIED" if spot_ok and futures_ok else ("PARTIAL" if spot_ok or futures_ok else "FAILED")
+    risk_permissions = (
+        "withdrawal_permission_enabled", "internal_transfer_permission_enabled",
+        "universal_transfer_permission_enabled", "spot_trading_permission_enabled",
+        "futures_trading_permission_enabled",
+    )
+    if restrictions.get("status") == "PASS":
+        has_complete_permissions = all(k in restrictions for k in ("read_enabled",) + risk_permissions)
+        if has_complete_permissions and restrictions.get("read_enabled") and not any(restrictions.get(k) for k in risk_permissions):
+            security_posture = "READ_ONLY_CONFIRMED"
+        elif has_complete_permissions and any(restrictions.get(k) for k in risk_permissions):
+            security_posture = "REVIEW_REQUIRED"
+        else:
+            security_posture = "PERMISSIONS_INCOMPLETE"
+    else:
+        security_posture = "PERMISSIONS_UNVERIFIED"
     result = {
-        "status": status, "checked_at_utc": checked,
+        "status": status, "security_posture": security_posture, "checked_at_utc": checked,
         "spot_read": spot, "futures_read": futures, "api_restrictions": restrictions,
         "copy_history": {
             "status": "NOT_VERIFIED",
@@ -155,8 +172,8 @@ def _bi_tax_verify_binance_connection():
         },
     }
     _bi_tax_set_state(connection_check=result)
-    app.logger.info("binance_connection_check status=%s spot=%s futures=%s restrictions=%s copy_history=not_verified",
-                    status, spot.get("status"), futures.get("status"), restrictions.get("status"))
+    app.logger.info("binance_connection_check status=%s security_posture=%s spot=%s futures=%s restrictions=%s copy_history=not_verified",
+                    status, security_posture, spot.get("status"), futures.get("status"), restrictions.get("status"))
     return result
 
 
@@ -304,9 +321,11 @@ async function biRunBinanceConnectionCheck(){
    const c=response.connection_check||{};
    const reason=x=>String((x||{}).reason||((x||{}).status)||'unknown');
    output.textContent='Overall: '+String(c.status||'unknown')+
+     ' | Key security: '+String(c.security_posture||'unknown')+
      ' | Spot read: '+String((c.spot_read||{}).status||'unknown')+' — '+reason(c.spot_read)+
      ' | Futures read: '+String((c.futures_read||{}).status||'unknown')+' — '+reason(c.futures_read)+
-     ' | API restrictions: '+String((c.api_restrictions||{}).status||'unknown')+
+     ' | Permission lookup: '+String((c.api_restrictions||{}).status||'unknown')+
+     ((c.api_restrictions||{}).status==='PASS'?' | Read enabled: '+String(!!c.api_restrictions.read_enabled)+' | Spot trading permission: '+String(!!c.api_restrictions.spot_trading_permission_enabled)+' | Futures trading permission: '+String(!!c.api_restrictions.futures_trading_permission_enabled)+' | Transfers: '+String(!!c.api_restrictions.internal_transfer_permission_enabled||!!c.api_restrictions.universal_transfer_permission_enabled)+' | Withdrawals: '+String(!!c.api_restrictions.withdrawal_permission_enabled):'')+
      ' | Personal Copy Trading history: NOT VERIFIED by these account endpoints.';
    if(typeof itCheckEnvCredentials==='function')await itCheckEnvCredentials();
    toast(c.status==='VERIFIED'?'Binance Spot and Futures read access verified; Copy Trading history is a separate check.':c.status==='PARTIAL'?'Partial Binance read access verified. Check endpoint details.':'Connection test completed; inspect the per-endpoint results.','info');
@@ -345,7 +364,7 @@ while True:
     src_value = html[value_start:value_end]
     if "app.js" in src_value:
         base_src = src_value.split("?v=", 1)[0].split("?", 1)[0]
-        replacement_src = base_src + "?v=bi-frontend-20261028-connection-check1"
+        replacement_src = base_src + "?v=bi-frontend-20261028-connection-check2"
         html = html[:value_start] + replacement_src + html[value_end:]
         cache_count = 1
         break
