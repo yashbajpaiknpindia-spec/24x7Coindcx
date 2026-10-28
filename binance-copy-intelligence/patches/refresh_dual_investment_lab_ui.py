@@ -274,6 +274,7 @@ setInterval(loadState,10000);
 </html>"""
 
 if "BINANCE_DUAL_INVESTMENT_LIVE_PAPER_MONITOR_V2" not in source:
+    _PAGE = _PAGE.replace('<option value="0">All durations</option>', "")
     page_pat = re.compile(r'_DI_PAGE = r""".*?"""\n\n\n@app\.get\("/dual-investment"\)', re.S)
     new_page = '_DI_PAGE = r"""' + _PAGE + '"""\n\n\n@app.get("/dual-investment")'
     source, page_count = page_pat.subn(lambda m: new_page, source, count=1)
@@ -285,6 +286,7 @@ if "BINANCE_DUAL_INVESTMENT_LIVE_PAPER_MONITOR_V2" not in source:
         ("def _di_scan(amount_usdt, direction_filter, max_distance, max_tail_loss_pct, max_settlement_hours=24):",
          "def _di_scan(amount_usdt, direction_filter, max_distance, max_tail_loss_pct, max_settlement_hours=168):"),
         ("_di_f(max_settlement_hours, 24.0)", "_di_f(max_settlement_hours, 168.0)"),
+        ("max_settlement_hours = max(0.0, min(720.0, _di_f(max_settlement_hours, 168.0)))", "max_settlement_hours = max(8.0, min(168.0, _di_f(max_settlement_hours, 168.0)))"),
         ('args.get("max_settlement_hours", 24)', 'args.get("max_settlement_hours", 168)'),
         ('_di_bg_os.environ.get("DI_MAX_SETTLEMENT_HOURS", "24")', '_di_bg_os.environ.get("DI_MAX_SETTLEMENT_HOURS", "168")'),
     ]
