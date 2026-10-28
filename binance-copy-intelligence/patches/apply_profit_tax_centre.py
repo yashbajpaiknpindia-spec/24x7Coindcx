@@ -328,8 +328,10 @@ def api_it_tax_summary():
     except Exception as exc: return jsonify({"error":"Unable to read personal trade ledger: "+str(exc)[:300]}),500
 
 def _it_parse_binance_income(row, strategy_name, market_type, source):
-    typ = str(row.get("incomeType") or row.get("income_type") or "").upper()
-    if typ not in ("REALIZED_PNL","COMMISSION","FUNDING_FEE"): return None
+    typ = str(row.get("incomeType") or row.get("income_type") or "UNKNOWN").upper()
+    if not typ: typ = "UNKNOWN"
+    # Preserve every income event for auditability. The tax calculations below
+    # intentionally count only realised PnL, commission, and funding fees.
     asset = str(row.get("asset") or "USDT").upper()
     amount = _it_float(row.get("income"),0.0)
     amount_usdt = amount if asset == "USDT" else None
@@ -358,6 +360,10 @@ def api_it_tax_sync():
     end_ms = int(_it_time.time()*1000)
     start_ms = end_ms - days*86400000
     records = []
+    raw_api_rows = 0
+    supported_income_records = 0
+    unsupported_income_type_counts = {}
+    supported_types = ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")
     cursor = start_ms
     try:
         while cursor < end_ms:
@@ -380,6 +386,12 @@ def api_it_tax_sync():
                 if not isinstance(payload,list): raise RuntimeError("Binance returned an unexpected response format.")
                 if not payload: break
                 for row in payload:
+                    raw_api_rows += 1
+                    income_type = str(row.get("incomeType") or row.get("income_type") or "UNKNOWN").upper() or "UNKNOWN"
+                    if income_type in supported_types:
+                        supported_income_records += 1
+                    else:
+                        unsupported_income_type_counts[income_type] = unsupported_income_type_counts.get(income_type, 0) + 1
                     item = _it_parse_binance_income(row,strategy,"FUTURES","BINANCE_FUTURES_INCOME_API")
                     if item: records.append(item)
                 page_loops += 1
@@ -390,8 +402,10 @@ def api_it_tax_sync():
             cursor = window_end + 1
         inserted = _it_upsert(records)
         result = _it_summary_data()
-        result["sync"] = {"fetched_supported_income_records":len(records),"new_records_saved":inserted,"lookback_days":days,
-          "credentials_saved":False,"source":"Binance USD-M Futures income history","note":"Only realised PnL, commissions, and funding-fee entries are imported. Other assets are retained but excluded from USDT totals; copy-portfolio attribution is not guaranteed."}
+        result["sync"] = {"fetched_api_rows":raw_api_rows,"fetched_supported_income_records":supported_income_records,
+          "unsupported_income_type_counts":unsupported_income_type_counts,"new_records_saved":inserted,"lookback_days":days,
+          "credentials_saved":False,"source":"Binance USD-M Futures income history",
+          "note":"All income events are retained. Only realised PnL, commissions, and funding-fee events contribute to PnL calculations. Other assets are retained but excluded from USDT totals; copy-portfolio attribution is not guaranteed."}
         return jsonify(result)
     except Exception as exc:
         return jsonify({"error":str(exc)[:500],"credentials_saved":False}),400
