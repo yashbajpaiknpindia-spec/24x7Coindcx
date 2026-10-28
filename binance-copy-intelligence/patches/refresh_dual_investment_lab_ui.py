@@ -358,7 +358,7 @@ if "BINANCE_DUAL_INVESTMENT_LIVE_PAPER_MONITOR_V2" not in source:
     source = source.replace(alloc_anchor, alloc_replacement, 1)
 
     # Use the allocated size, not the entire budget, when opening each new paper ledger row.
-    source = source.replace('"amount": amount_usdt,', '"amount": row.get("allocated_amount_usdt", amount_usdt),', 1)
+    source = source.replace('"quote_factor": row["quote_to_usdt"], "amount": amount_usdt,', '"quote_factor": row["quote_to_usdt"], "amount": row.get("allocated_amount_usdt", amount_usdt),', 1)
     # Reward/PnL values have already been scaled to the allocation above.
     source += r'''
 
