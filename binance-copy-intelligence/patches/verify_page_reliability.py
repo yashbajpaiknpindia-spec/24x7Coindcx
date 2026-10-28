@@ -265,6 +265,11 @@ check(
     predicate=lambda d: isinstance(d.get("by_strategy", []), list),
 )
 check(
+    "Personal account sync status diagnostics",
+    "/api/profit-tax/sync-status",
+    predicate=lambda d: "status" in d and "api_key_configured" in d and "credentials_validated_by_binance" in d,
+)
+check(
     "Server-managed tax sync refuses missing env safely",
     "/api/profit-tax/sync",
     method="POST",
@@ -286,6 +291,10 @@ if 'id="pt-api-key"' in html or 'id="pt-api-secret"' in html:
     raise AssertionError("UI smoke failed: manual API credential inputs remain")
 if "pt-env-status" not in html or "Configured on the server" not in js:
     raise AssertionError("UI smoke failed: server-managed credential status is missing")
+if "personal Futures sync" not in js or "Spot per-symbol fills" not in html:
+    raise AssertionError("UI smoke failed: personal account sync status/scope diagnostics are missing")
+if 'await itLoadProfitTax(true);' in html or 'function(){return itLoadProfitTax(true)}' in html:
+    raise AssertionError("UI smoke failed: page navigation can trigger a duplicate signed account sync")
 if '"profit-tax":"Profit & Tax Centre"' not in html or '"strategy-watch":"Strategy Tax Watch"' not in html:
     raise AssertionError("UI smoke failed: tax pages missing from navigation failsafe")
 for function_name in ("loadPortfolioLab", "loadMultiTrader", "loadTradeBehaviour", "itLoadProfitTax", "itCheckEnvCredentials"):
