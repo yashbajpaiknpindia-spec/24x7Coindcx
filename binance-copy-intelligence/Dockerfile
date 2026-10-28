@@ -17,6 +17,8 @@ RUN apt-get update \
     && python /tmp/patches/apply_portfolio_lab_daily_ui.py \
     && python /tmp/patches/apply_live_history_improvements.py \
     && python /tmp/patches/apply_position_history_dedupe.py \
+    && python -m py_compile /tmp/patches/apply_profit_tax_centre.py \
+    && python /tmp/patches/apply_profit_tax_centre.py \
     && python /tmp/patches/apply_frontend_cache_bust.py \
     && python /tmp/patches/inspect_runtime_contracts.py \
     && nodejs --check /app/static/app.js \
