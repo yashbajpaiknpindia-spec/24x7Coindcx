@@ -21,6 +21,11 @@ RUN apt-get update \
     && python /tmp/patches/apply_profit_tax_centre.py \
     && python /tmp/patches/apply_frontend_cache_bust.py \
     && python /tmp/patches/inspect_runtime_contracts.py \
+    && python -m py_compile /tmp/patches/apply_dual_investment_intelligence.py \
+    && python /tmp/patches/apply_dual_investment_intelligence.py \
+    && python -m py_compile /tmp/patches/fix_dual_investment_intelligence.py \
+    && python /tmp/patches/fix_dual_investment_intelligence.py \
+    && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
     && apt-get autoremove -y \
