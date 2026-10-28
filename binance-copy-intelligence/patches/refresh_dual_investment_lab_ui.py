@@ -623,12 +623,14 @@ def _di_settle_matured():
 
 # Background scans persist live marks even if the dashboard is not open.
 _bg_marker = '            app.logger.info(\n                "dual_investment_background_scan_completed'
-_bg_replacement = '''            try:
-                _di_ui_update_live_positions(persist=True)
-            except Exception:
-                app.logger.exception("dual_investment_live_mark_failed")
-            app.logger.info(
-                "dual_investment_background_scan_completed'''
+_bg_replacement = (
+    '            try:\n'
+    '                _di_ui_update_live_positions(persist=True)\n'
+    '            except Exception:\n'
+    '                app.logger.exception("dual_investment_live_mark_failed")\n'
+    '            app.logger.info(\n'
+    '                "dual_investment_background_scan_completed'
+)
 if source.count(_bg_marker) == 1:
     source = source.replace(_bg_marker, _bg_replacement, 1)
 
