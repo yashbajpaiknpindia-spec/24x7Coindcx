@@ -299,13 +299,11 @@ if "BINANCE_DUAL_INVESTMENT_LIVE_PAPER_MONITOR_V2" not in source:
               UPDATE dual_inv_paper_decisions
               SET status='CLOSED_POLICY',
                   settled_at_utc=:now,
-                  settlement_note=:note,
-                  tax_note=:tax_note
+                  settlement_note=:note
               WHERE status='OPEN' AND settle_date_ms > :cutoff_ms
             """), {
                 "now": _di_utc_now(),
                 "note": "Archived from active paper positions because the current scan horizon is limited to %.1f hours. This record was paper-only; no Binance subscription or fund transfer occurred." % max_settlement_hours,
-                "tax_note": "No tax calculated: this paper record was archived, not settled or transferred.",
                 "cutoff_ms": _di_now_ms() + int(max_settlement_hours * 3600000),
             })
             _di_policy_db.commit()
