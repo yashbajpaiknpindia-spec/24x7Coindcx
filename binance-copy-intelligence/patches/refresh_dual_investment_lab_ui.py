@@ -359,6 +359,19 @@ if "BINANCE_DUAL_INVESTMENT_LIVE_PAPER_MONITOR_V2" not in source:
 
     # Use the allocated size, not the entire budget, when opening each new paper ledger row.
     source = source.replace('"quote_factor": row["quote_to_usdt"], "amount": amount_usdt,', '"quote_factor": row["quote_to_usdt"], "amount": row.get("allocated_amount_usdt", amount_usdt),', 1)
+    # Add mark persistence to the worker loop at build time, before app.py is imported.
+    _bg_marker = '            app.logger.info(\n                "dual_investment_background_scan_completed'
+    _bg_replacement = (
+        '            try:\n'
+        '                _di_ui_update_live_positions(persist=True)\n'
+        '            except Exception:\n'
+        '                app.logger.exception("dual_investment_live_mark_failed")\n'
+        '            app.logger.info(\n'
+        '                "dual_investment_background_scan_completed'
+    )
+    if source.count(_bg_marker) == 1:
+        source = source.replace(_bg_marker, _bg_replacement, 1)
+
     # Reward/PnL values have already been scaled to the allocation above.
     source += r'''
 
@@ -622,18 +635,6 @@ def _di_settle_matured():
     return settled
 
 # Background scans persist live marks even if the dashboard is not open.
-_bg_marker = '            app.logger.info(\n                "dual_investment_background_scan_completed'
-_bg_replacement = (
-    '            try:\n'
-    '                _di_ui_update_live_positions(persist=True)\n'
-    '            except Exception:\n'
-    '                app.logger.exception("dual_investment_live_mark_failed")\n'
-    '            app.logger.info(\n'
-    '                "dual_investment_background_scan_completed'
-)
-if source.count(_bg_marker) == 1:
-    source = source.replace(_bg_marker, _bg_replacement, 1)
-
 '''
     APP_PATH.write_text(source)
 
