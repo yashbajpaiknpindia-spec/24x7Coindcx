@@ -281,20 +281,38 @@ check(
 # traverse Flask's browser-auth before_request gate. Stub the view so this test
 # uses synthetic credentials and never reaches Binance or sends a live request.
 _original_sync_view = app_module.api_it_tax_sync
+_original_connection_check = app_module._bi_tax_verify_binance_connection
 try:
     os.environ["BINANCE_API_KEY"] = "LOCAL_SMOKE_KEY"
     os.environ["BINANCE_API_SECRET"] = "LOCAL_SMOKE_SECRET"
+    def _smoke_connection_check():
+        result = {
+            "status": "VERIFIED",
+            "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "spot_read": {"status": "PASS", "account_read_verified": True},
+            "futures_read": {"status": "PASS", "account_read_verified": True},
+            "api_restrictions": {"status": "PASS", "read_enabled": True, "withdrawal_permission_enabled": False},
+            "copy_history": {"status": "NOT_VERIFIED", "note": "Synthetic local result only."},
+        }
+        app_module._bi_tax_set_state(connection_check=result)
+        return result
+    app_module._bi_tax_verify_binance_connection = _smoke_connection_check
+    status, payload, _raw = call_view("/api/binance/connection-check", method="POST", body={})
+    if status != 200 or payload.get("connection_check", {}).get("status") != "VERIFIED":
+        raise AssertionError("Connection diagnostic route failed isolated smoke test: " + str(payload))
+    checks.append(("Live connection diagnostic route schema (network stubbed)", 200, "PASS"))
     def _smoke_tax_sync_view():
         from flask import jsonify
-        return jsonify({"sync": {"fetched_supported_income_records": 3, "new_records_saved": 3}})
+        return jsonify({"sync": {"fetched_api_rows": 3, "fetched_supported_income_records": 3, "new_records_saved": 3}})
     app_module.api_it_tax_sync = _smoke_tax_sync_view
     app_module._bi_tax_sync_from_environment("LOCAL_SMOKE")
     state = dict(app_module._BI_TAX_SYNC_STATE)
-    if state.get("status") != "SUCCEEDED" or state.get("records_fetched") != 3:
+    if state.get("status") != "SUCCEEDED" or state.get("records_fetched") != 3 or state.get("connection_check", {}).get("status") != "VERIFIED":
         raise AssertionError("Background sync did not call its internal view correctly: " + str(state))
     checks.append(("Background account sync bypasses browser-login routing", 200, "PASS"))
 finally:
     app_module.api_it_tax_sync = _original_sync_view
+    app_module._bi_tax_verify_binance_connection = _original_connection_check
     os.environ.pop("BINANCE_API_KEY", None)
     os.environ.pop("BINANCE_API_SECRET", None)
 
@@ -313,6 +331,10 @@ if "pt-env-status" not in html or "Configured on the server" not in js:
     raise AssertionError("UI smoke failed: server-managed credential status is missing")
 if "personal Futures sync" not in js or "Spot fills" not in html:
     raise AssertionError("UI smoke failed: personal account sync status/scope diagnostics are missing")
+if 'id="bi-connection-check"' not in html or "/api/binance/connection-check" not in js:
+    raise AssertionError("UI smoke failed: signed Binance connection diagnostic control/route is missing")
+if "_bi_tax_signed_probe" not in app_module.__dict__ or "_bi_tax_verify_binance_connection" not in app_module.__dict__:
+    raise AssertionError("UI smoke failed: signed endpoint diagnostic functions are missing")
 if 'await itLoadProfitTax(true);' in html or 'function(){return itLoadProfitTax(true)}' in html:
     raise AssertionError("UI smoke failed: page navigation can trigger a duplicate signed account sync")
 if '"profit-tax":"Profit & Tax Centre"' not in html or '"strategy-watch":"Strategy Tax Watch"' not in html:
