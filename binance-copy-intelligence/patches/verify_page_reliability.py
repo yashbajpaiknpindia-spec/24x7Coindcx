@@ -316,6 +316,41 @@ finally:
     os.environ.pop("BINANCE_API_KEY", None)
     os.environ.pop("BINANCE_API_SECRET", None)
 
+# Verify the Personal Copy History importer in a multipart Flask request against the
+# disposable SQLite ledger. This is synthetic fixture data; it never calls Binance.
+from io import BytesIO
+copy_csv = (
+    "time,symbol,incomeType,income,asset,tradeId\n"
+    "2026-10-27 10:30:00,BTCUSDT,REALIZED_PNL,12.50,USDT,SMOKE-555\n"
+    "2026-10-27 10:30:01,BTCUSDT,COMMISSION,-0.10,USDT,SMOKE-555\n"
+    "2026-10-27 10:30:02,BTCUSDT,FUNDING_FEE,-0.01,USDT,SMOKE-555\n"
+)
+with flask_app.test_request_context(
+    "/api/profit-tax/import",
+    method="POST",
+    data={
+        "file": (BytesIO(copy_csv.encode("utf-8")), "copy-history-smoke.csv"),
+        "source_kind": "FUTURES_COPY_TRADE_HISTORY",
+        "market_type": "FUTURES",
+        "strategy_name": "Local Copy Import Smoke",
+    },
+    content_type="multipart/form-data",
+):
+    import_result = flask_app.make_response(flask_app.view_functions["api_it_tax_import"]())
+    import_status = import_result.status_code
+    import_payload = import_result.get_json(silent=True) or {}
+if import_status != 200:
+    raise AssertionError("Personal Copy History CSV import failed in isolated smoke test: " + str(import_payload)[:1200])
+import_meta = import_payload.get("import") or {}
+import_categories = import_meta.get("categories") or {}
+if int(import_meta.get("recognised_records", 0)) != 3 or int(import_meta.get("new_records_saved", 0)) != 3:
+    raise AssertionError("Personal Copy History import did not persist all three synthetic events: " + str(import_meta))
+if not all(int(import_categories.get(name, 0)) == 1 for name in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")):
+    raise AssertionError("Personal Copy History import categories were not parsed correctly: " + str(import_categories))
+if import_meta.get("credentials_saved") is not False:
+    raise AssertionError("Personal Copy History importer must never save API credentials")
+checks.append(("Personal Copy History CSV importer · PnL, commission, funding, dedupe store", 200, "PASS"))
+
 html_path = Path("/app/templates/index.html")
 js_path = Path("/app/static/app.js")
 html = html_path.read_text()
@@ -333,6 +368,8 @@ if "personal Futures sync" not in js or "Spot fills" not in html:
     raise AssertionError("UI smoke failed: personal account sync status/scope diagnostics are missing")
 if 'id="bi-connection-check"' not in html or "/api/binance/connection-check" not in js:
     raise AssertionError("UI smoke failed: signed Binance connection diagnostic control/route is missing")
+if 'id="pt-source-kind"' not in html or "source_kind" not in js or "BI_PERSONAL_COPY_HISTORY_IMPORT_V1" not in app_module.__dict__:
+    raise AssertionError("UI smoke failed: personal Copy History source selector/parser is missing")
 if "_bi_tax_signed_probe" not in app_module.__dict__ or "_bi_tax_verify_binance_connection" not in app_module.__dict__:
     raise AssertionError("UI smoke failed: signed endpoint diagnostic functions are missing")
 if 'await itLoadProfitTax(true);' in html or 'function(){return itLoadProfitTax(true)}' in html:
