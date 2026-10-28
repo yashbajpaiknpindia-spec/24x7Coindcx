@@ -27,8 +27,10 @@ _BI_TAX_SYNC_STATE = {
     "status": "WAITING",
     "last_attempt_utc": None,
     "last_success_utc": None,
+    "records_received": 0,
     "records_fetched": 0,
     "records_inserted": 0,
+    "unsupported_income_type_counts": {},
     "lookback_days": 90,
     "error": None,
     "source": "Binance USD-M Futures income history",
@@ -73,14 +75,17 @@ def _bi_tax_sync_from_environment(trigger="startup"):
         attempted = _bi_tax_utc_now()
         if response.status_code == 200 and not payload.get("error"):
             details = payload.get("sync") or {}
+            received = int(details.get("fetched_api_rows", details.get("fetched_supported_income_records", 0)) or 0)
             fetched = int(details.get("fetched_supported_income_records") or 0)
             inserted = int(details.get("new_records_saved") or 0)
-            _bi_tax_set_state(status="SUCCEEDED" if fetched else "SUCCEEDED_NO_RECORDS",
+            unsupported = details.get("unsupported_income_type_counts") or {}
+            _bi_tax_set_state(status="SUCCEEDED" if received else "SUCCEEDED_NO_RECORDS",
                               last_attempt_utc=attempted, last_success_utc=attempted,
-                              records_fetched=fetched, records_inserted=inserted,
+                              records_received=received, records_fetched=fetched, records_inserted=inserted,
+                              unsupported_income_type_counts=unsupported,
                               lookback_days=days, error=None)
-            app.logger.info("binance_personal_sync_completed trigger=%s lookback_days=%s fetched=%s inserted=%s",
-                            trigger, days, fetched, inserted)
+            app.logger.info("binance_personal_sync_completed trigger=%s lookback_days=%s rows_received=%s tax_relevant=%s inserted=%s unsupported_income_types=%s",
+                            trigger, days, received, fetched, inserted, _bi_tax_json.dumps(unsupported, sort_keys=True))
         else:
             reason = str(payload.get("error") or "Binance sync endpoint returned HTTP " + str(response.status_code))[:240]
             _bi_tax_set_state(status="FAILED", last_attempt_utc=attempted,
@@ -151,7 +156,7 @@ if "BI_TAX_SYNC_STATUS_UI_V1" not in js:
    const sync=await api('/api/profit-tax/sync-status').catch(()=>null);
    const ready=!!(c.binance_api_key_configured&&c.binance_api_secret_configured);
    const el=$('#pt-env-status');
-   const syncLabel=sync?(' · personal Futures sync: '+String(sync.status||'unknown').replaceAll('_',' ').toLowerCase()+(sync.records_fetched!==undefined?' · '+Number(sync.records_fetched||0)+' records fetched':'')):'';
+   const syncLabel=sync?(' · personal Futures sync: '+String(sync.status||'unknown').replaceAll('_',' ').toLowerCase()+(sync.records_received!==undefined?' · '+Number(sync.records_received||0)+' API rows / '+Number(sync.records_fetched||0)+' PnL-fee-funding rows':'')):'';
    if(el)el.textContent=(ready?'Configured on the server · values hidden':'Missing BINANCE_API_KEY or BINANCE_API_SECRET in Render service environment')+syncLabel;
    if(sync&&sync.status==='FAILED'){
      const warning=$('#pt-warning');if(warning)warning.textContent='Automatic Binance Futures account sync failed: '+String(sync.error||'See Render logs')+'. Credentials are present, but Binance must accept their signature and permissions. Spot fills are outside this sync.';
