@@ -351,6 +351,32 @@ if import_meta.get("credentials_saved") is not False:
     raise AssertionError("Personal Copy History importer must never save API credentials")
 checks.append(("Personal Copy History CSV importer · PnL, commission, funding, dedupe store", 200, "PASS"))
 
+# Exercise the paste-table fallback with tab-separated clipboard content.
+pasted_table = (
+    "time\tsymbol\tincomeType\tincome\tasset\ttradeId\n"
+    "2026-10-27 10:30:00\tETHUSDT\tREALIZED_PNL\t7.50\tUSDT\tSMOKE-PASTE-1\n"
+)
+with flask_app.test_request_context(
+    "/api/profit-tax/import",
+    method="POST",
+    data={
+        "pasted_history": pasted_table,
+        "source_kind": "FUTURES_COPY_TRADE_HISTORY",
+        "market_type": "FUTURES",
+        "strategy_name": "Local Copy Paste Smoke",
+    },
+    content_type="multipart/form-data",
+):
+    pasted_result = flask_app.make_response(flask_app.view_functions["api_it_tax_import"]())
+    pasted_status = pasted_result.status_code
+    pasted_payload = pasted_result.get_json(silent=True) or {}
+if pasted_status != 200:
+    raise AssertionError("Personal Copy History paste import failed in isolated smoke test: " + str(pasted_payload)[:1200])
+pasted_meta = pasted_payload.get("import") or {}
+if int(pasted_meta.get("recognised_records", 0)) != 1 or int(pasted_meta.get("new_records_saved", 0)) != 1:
+    raise AssertionError("Personal Copy History paste import did not save the TSV event: " + str(pasted_meta))
+checks.append(("Personal Copy History paste importer · TSV clipboard table", 200, "PASS"))
+
 html_path = Path("/app/templates/index.html")
 js_path = Path("/app/static/app.js")
 html = html_path.read_text()
