@@ -368,7 +368,7 @@ if "personal Futures sync" not in js or "Spot fills" not in html:
     raise AssertionError("UI smoke failed: personal account sync status/scope diagnostics are missing")
 if 'id="bi-connection-check"' not in html or "/api/binance/connection-check" not in js:
     raise AssertionError("UI smoke failed: signed Binance connection diagnostic control/route is missing")
-if 'id="pt-source-kind"' not in html or "source_kind" not in js or "BI_PERSONAL_COPY_HISTORY_IMPORT_V1" not in app_module.__dict__:
+if 'id="pt-source-kind"' not in html or "source_kind" not in js or "_pc_api_it_tax_import" not in app_module.__dict__:
     raise AssertionError("UI smoke failed: personal Copy History source selector/parser is missing")
 if "_bi_tax_signed_probe" not in app_module.__dict__ or "_bi_tax_verify_binance_connection" not in app_module.__dict__:
     raise AssertionError("UI smoke failed: signed endpoint diagnostic functions are missing")
