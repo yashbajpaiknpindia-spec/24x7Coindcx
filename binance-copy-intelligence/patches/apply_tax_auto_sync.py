@@ -172,7 +172,7 @@ if "BI_TAX_SYNC_STATUS_UI_V1" not in js:
 # Bump it again after modifying app.js so browsers don't keep the old tax status UI.
 html = HTML.read_text()
 html, cache_count = _bi_tax_re.subn(
-    r'(src=["\\'][^"\\']*app\\.js\\?v=)[^"\\']+',
+    r"(src=['\\"][^'\\"]*app\\.js\\?v=)[^'\\"]+",
     r'\g<1>bi-frontend-20261028-personal-sync3',
     html,
     count=1,
