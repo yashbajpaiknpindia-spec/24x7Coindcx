@@ -738,7 +738,7 @@ def _di_scan(amount_usdt, direction_filter, max_distance, max_tail_loss_pct):
     }
 
 
-_DI_PAGE = r'''<!doctype html>
+_DI_PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Dual Investment Lab | Binance Intelligence</title>
 <style>
@@ -850,7 +850,7 @@ $("di-scan").addEventListener("click",function(){scanNow(false)});
 load();
 setInterval(function(){load()},300000);
 })();
-</script></body></html>'''
+</script></body></html>"""
 
 
 @app.get("/dual-investment")
