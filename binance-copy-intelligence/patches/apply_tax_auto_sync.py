@@ -131,6 +131,10 @@ if "This read-only sync imports USD-M Futures income events." not in html:
     if html.count(anchor) != 1:
         raise RuntimeError("Cannot find unique tax credential status element for sync-scope note")
     html = html.replace(anchor, anchor + '<p class="help-text">' + scope_note + '</p>', 1)
+# The background worker now owns automatic sync; page navigation only reads
+# status and summaries to avoid launching a second, concurrent signed request.
+html = html.replace("await itLoadProfitTax(true);", "await itLoadProfitTax(false);")
+html = html.replace("function(){return itLoadProfitTax(true)}", "function(){return itLoadProfitTax(false)}")
 HTML.write_text(html)
 
 js = JS.read_text()
