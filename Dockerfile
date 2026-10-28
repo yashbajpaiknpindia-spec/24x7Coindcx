@@ -41,6 +41,8 @@ RUN apt-get update \
     && python /tmp/patches/apply_page_reliability_fixes.py \
     && python -m py_compile /tmp/patches/apply_tax_auto_sync.py \
     && python /tmp/patches/apply_tax_auto_sync.py \
+    && python -m py_compile /tmp/patches/apply_personal_copy_history.py \
+    && python /tmp/patches/apply_personal_copy_history.py \
     && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
