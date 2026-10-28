@@ -49,6 +49,8 @@ RUN apt-get update \
     && python /tmp/patches/fix_dual_investment_intelligence.py \
     && python -m py_compile /tmp/patches/enable_dual_investment_background_worker.py \
     && python /tmp/patches/enable_dual_investment_background_worker.py \
+    && python -m py_compile /tmp/patches/limit_dual_investment_settlement_horizon.py \
+    && python /tmp/patches/limit_dual_investment_settlement_horizon.py \
     && python -m py_compile /app/app.py \
     && nodejs --check /app/static/app.js \
     && apt-get purge -y nodejs \
