@@ -161,7 +161,7 @@ if "BI_PAGE_RELIABILITY_FIXES_V2" not in js:
    const r=await api('/api/profit-tax/rates');
    $('#pt-buy-rate').value=r.buy_quote_inr_per_usdt||'';
    $('#pt-sell-rate').value=r.sell_quote_inr_per_usdt||'';
-   $('#pt-rate-status').textContent=r.sell_quote_inr_per_usdt?'Binance P2P quote · '+String(r.as_of_utc||'').slice(0,19)+' UTC':'P2P quote unavailable · enter a rate manually';
+   $('#pt-rate-status').textContent=r.sell_quote_inr_per_usdt?'Binance P2P quote · '+String(r.as_of_utc||'').slice(0,19)+' UTC':'P2P source unavailable · enter a rate manually';
    if(!$('#pt-rate').dataset.manual&&r.sell_quote_inr_per_usdt)$('#pt-rate').value=r.sell_quote_inr_per_usdt;
    $('#pt-rate-status').title=r.note||r.source||'';
  }catch(e){
@@ -181,51 +181,6 @@ async function itCheckEnvCredentials(){
    const el=$('#pt-env-status');if(el)el.textContent='Could not verify server configuration: '+e.message;
    return null;
  }
-}
-async function itLoadProfitTax(autoSync=false){
- try{
-   let d=await api('/api/profit-tax/summary');
-   itRenderTax(d);
-   const cfg=await itCheckEnvCredentials();
-   if(autoSync&&!window.__biTaxEnvSyncAttempted){
-     window.__biTaxEnvSyncAttempted=true;
-     if(cfg&&cfg.binance_api_key_configured&&cfg.binance_api_secret_configured){
-       const b=$('#pt-sync');if(b){b.disabled=true;b.textContent='Fetching Binance income from server credentials…';}
-       try{
-         d=await api('/api/profit-tax/sync',{method:'POST',body:JSON.stringify({lookback_days:Number($('#pt-days').value||30),strategy_name:($('#pt-strategy-sync').value||'Unattributed Binance Futures').trim()})});
-         itRenderTax(d);
-         const nSaved=Number(d.sync&&d.sync.new_records_saved||0),nFetched=Number(d.sync&&d.sync.fetched_supported_income_records||0);
-         toast('Server sync complete: '+nFetched+' income records fetched; '+nSaved+' new records saved.','success');
-       }catch(syncError){
-         const warning=$('#pt-warning');
-         if(warning)warning.textContent='Automatic Binance sync failed: '+syncError.message+'. The environment variables are present; check read-only/Futures permissions, IP restrictions and API validity. Existing ledger records remain visible.';
-         toast('Binance sync failed: '+syncError.message,'error');
-       }finally{
-         if(b){b.disabled=false;b.textContent='Fetch Binance Futures income using server credentials';}
-       }
-     }else{
-       const warning=$('#pt-warning');
-       if(warning)warning.textContent='Server-managed Binance sync is not configured. Set BINANCE_API_KEY and BINANCE_API_SECRET in the Render service environment. No credentials should be pasted into this page.';
-     }
-   }
- }catch(e){
-   const warning=$('#pt-warning');if(warning)warning.textContent='Unable to load Profit & Tax Centre: '+e.message;
-   const status=$('#pt-ledger-status');if(status)status.textContent='Data load failed';
- }
-}
-async function itSyncBinance(){
- const days=Number($('#pt-days').value||30);
- const label=($('#pt-strategy-sync').value||'Unattributed Binance Futures').trim();
- const b=$('#pt-sync');
- if(b){b.disabled=true;b.textContent='Fetching Binance income from server credentials…';}
- try{
-   const cfg=await api('/api/config-status');
-   if(!cfg.binance_api_key_configured||!cfg.binance_api_secret_configured)throw new Error('BINANCE_API_KEY and BINANCE_API_SECRET must be configured in Render environment settings.');
-   const d=await api('/api/profit-tax/sync',{method:'POST',body:JSON.stringify({lookback_days:days,strategy_name:label})});
-   itRenderTax(d);
-   toast('Binance income fetched: '+n(d.sync&&d.sync.fetched_supported_income_records,0)+'; new records saved: '+n(d.sync&&d.sync.new_records_saved,0)+'.','success');
- }catch(e){toast('Binance sync failed: '+e.message,'error');const warning=$('#pt-warning');if(warning)warning.textContent='Binance sync failed: '+e.message}
- finally{if(b){b.disabled=false;b.textContent='Fetch Binance Futures income using server credentials';}}
 }
 '''
     # Replace the old implementations as complete function blocks, avoiding
