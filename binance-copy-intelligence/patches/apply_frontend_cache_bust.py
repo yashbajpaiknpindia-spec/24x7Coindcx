@@ -20,7 +20,7 @@ matches = list(pattern.finditer(html))
 if len(matches) != 1:
     raise RuntimeError(f"Expected exactly one app.js script include in index.html; found {len(matches)}")
 
-version = "bi-frontend-20261025-r2"
+version = "bi-frontend-20261028-tax1"
 m = matches[0]
 replacement = m.group("prefix") + m.group("q") + m.group("src") + "?v=" + version + m.group("q") + m.group("suffix")
 html = html[:m.start()] + replacement + html[m.end():]
