@@ -80,21 +80,10 @@ if "BINANCE_DUAL_INVESTMENT_DURATION_FILTER_V1" not in source:
         '<th>Direction filter</th><th>Max duration</th><th>Market data</th><th>API diagnostics</th>',
         "scan history table header"
     )
-    replace_once(
-        '<td colspan="7" class="empty">No scans recorded yet.</td>',
-        '<td colspan="8" class="empty">No scans recorded yet.</td>',
-        "empty scan history placeholder"
-    )
-    replace_once(
-        'return \'<tr>\'+htmlCell(r.started_at_utc)+(\'<td><span class="pill \'+(r.status==="OK"?"good":"warn")+\'">\'+esc(r.status)+\'</span></td>\')+htmlCell(r.offers_recorded)+htmlCell(r.selected_count)+htmlCell(r.direction_filter)+htmlCell(Object.keys(markets).filter(function(k){return markets[k]&&markets[k].spot}).length+" pairs")',
-        'const cfg=markets.scan_config||{};const hours=cfg.max_settlement_hours===0?"All":(cfg.max_settlement_hours===undefined?"—":"≤ "+num(cfg.max_settlement_hours,0)+" h");return \'<tr>\'+htmlCell(r.started_at_utc)+(\'<td><span class="pill \'+(r.status==="OK"?"good":"warn")+\'">\'+esc(r.status)+\'</span></td>\')+htmlCell(r.offers_recorded)+htmlCell(r.selected_count)+htmlCell(r.direction_filter)+htmlCell(hours)+htmlCell(Object.keys(markets).filter(function(k){return markets[k]&&markets[k].spot}).length+" pairs")',
-        "scan history duration display"
-    )
-    replace_once(
-        '<td colspan="7" class="empty">No scans recorded yet.</td>',
-        '<td colspan="8" class="empty">No scans recorded yet.</td>',
-        "scan history placeholder colspan" 
-    )
+    placeholder = '<td colspan="7" class="empty">No scans recorded yet.</td>'
+    if source.count(placeholder) != 2:
+        raise RuntimeError("Expected the empty scan placeholder in the static table and JS renderer")
+    source = source.replace(placeholder, '<td colspan="8" class="empty">No scans recorded yet.</td>')
 
     source += "\n# BINANCE_DUAL_INVESTMENT_DURATION_FILTER_V1\n"
     APP.write_text(source)
