@@ -21,6 +21,8 @@ if "BI_TAX_AUTO_SYNC_WORKER_V1" not in app_text:
 import threading as _bi_tax_threading
 import time as _bi_tax_worker_time
 import os as _bi_tax_os
+import json as _bi_tax_json
+import re as _bi_tax_re
 
 _BI_TAX_SYNC_LOCK = _bi_tax_threading.RLock()
 _BI_TAX_SYNC_STATE = {
@@ -165,5 +167,18 @@ if "BI_TAX_SYNC_STATUS_UI_V1" not in js:
         raise RuntimeError("Cannot find unique credentials status client function anchor")
     js = js.replace(old, new, 1) + "\n// BI_TAX_SYNC_STATUS_UI_V1\n"
     JS.write_text(js)
+
+# The patches that add pages also rewrite the cache key before this patch runs.
+# Bump it again after modifying app.js so browsers don't keep the old tax status UI.
+html = HTML.read_text()
+html, cache_count = _bi_tax_re.subn(
+    r'(src=["\\'][^"\\']*app\\.js\\?v=)[^"\\']+',
+    r'\g<1>bi-frontend-20261028-personal-sync3',
+    html,
+    count=1,
+)
+if cache_count != 1:
+    raise RuntimeError("Could not cache-bust final app.js asset after personal sync UI update")
+HTML.write_text(html)
 
 print("Installed scheduled server-environment Binance Futures income sync and visible sync diagnostics.")
