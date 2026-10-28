@@ -23,7 +23,7 @@ if "BINANCE_DUAL_INVESTMENT_P01_TAIL_GATE_V1" not in source:
     )
     replace_once(
         '<strong>Historic exercise proxy:</strong> rolling hourly close-to-close returns of the same estimated duration are tested against the current target/spot ratio. This ignores the exact 30-minute fixing mechanics, fees/spreads, structural market changes, and execution constraints. The P05 result is an empirical lower-tail proxy, not a worst-case bound.<br>',
-        '<strong>Historic exercise proxy:</strong> rolling hourly close-to-close returns of the same estimated duration are tested against the current target/spot ratio. This ignores the exact 30-minute fixing mechanics, fees/spreads, structural market changes, and execution constraints. P05 and P01 are empirical lower-tail proxies, not worst-case bounds.<br><strong>Conservative tail gate:</strong> selection checks both the historical 5th and 1st percentile against your maximum-loss threshold; moves outside historical samples can still be worse.<br>',
+        '<strong>Historic exercise proxy:</strong> rolling hourly close-to-close returns of the same estimated duration are tested against the current target/spot ratio. This ignores the exact 30-minute fixing mechanics, fees/spreads, structural market changes, and execution constraints. The P05 result is an empirical lower-tail proxy, not a worst-case bound.<br><strong>Conservative tail gate:</strong> selection checks both the historical 5th and 1st percentile against your maximum-loss threshold; moves outside historical samples can still be worse.<br>',
         "tail-risk explanation"
     )
     source += "\n# BINANCE_DUAL_INVESTMENT_P01_TAIL_GATE_V1\n"
