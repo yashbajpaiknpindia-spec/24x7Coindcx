@@ -277,6 +277,26 @@ check(
     status_wanted=503,
     predicate=lambda d: d.get("credentials_saved") is False,
 )
+# The worker must call the tax view directly in an internal request context, not
+# traverse Flask's browser-auth before_request gate. Stub the view so this test
+# uses synthetic credentials and never reaches Binance or sends a live request.
+_original_sync_view = app_module.api_it_tax_sync
+try:
+    os.environ["BINANCE_API_KEY"] = "LOCAL_SMOKE_KEY"
+    os.environ["BINANCE_API_SECRET"] = "LOCAL_SMOKE_SECRET"
+    def _smoke_tax_sync_view():
+        from flask import jsonify
+        return jsonify({"sync": {"fetched_supported_income_records": 3, "new_records_saved": 3}})
+    app_module.api_it_tax_sync = _smoke_tax_sync_view
+    app_module._bi_tax_sync_from_environment("LOCAL_SMOKE")
+    state = dict(app_module._BI_TAX_SYNC_STATE)
+    if state.get("status") != "SUCCEEDED" or state.get("records_fetched") != 3:
+        raise AssertionError("Background sync did not call its internal view correctly: " + str(state))
+    checks.append(("Background account sync bypasses browser-login routing", 200, "PASS"))
+finally:
+    app_module.api_it_tax_sync = _original_sync_view
+    os.environ.pop("BINANCE_API_KEY", None)
+    os.environ.pop("BINANCE_API_SECRET", None)
 
 html_path = Path("/app/templates/index.html")
 js_path = Path("/app/static/app.js")
