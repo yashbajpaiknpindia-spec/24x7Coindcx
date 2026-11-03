@@ -1,0 +1,49 @@
+name: Binance Intel live research snapshot
+
+on:
+  push:
+    branches:
+      - "binance-intel/trader-pattern-research-v1"
+    paths:
+      - "binance-copy-intelligence/research_v1/**"
+      - ".github/workflows/binance-research-snapshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-analyse-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Collect public Binance lead-trader histories
+        working-directory: binance-copy-intelligence/research_v1
+        run: |
+          python collect_binance_leaders.py --out data/binance_research --pages 1 --history-pages 10 --max-leaders 50 --delay 1.0
+      - name: Analyse wins, losses, holding times and concentration
+        working-directory: binance-copy-intelligence/research_v1
+        run: |
+          python analyze_patterns.py --input data/binance_research/positions.jsonl --out data/binance_research/pattern_report.json
+      - name: Fetch current top-10 USDⓈ-M perpetuals and 60 days of 1m candles
+        working-directory: binance-copy-intelligence/research_v1
+        run: |
+          python fetch_top10_market_data.py --out data/binance_research --lookback-days 60 --delay 0.15
+      - name: Run chronological train/test follower replay
+        working-directory: binance-copy-intelligence/research_v1
+        run: |
+          CUTOFF="$(date -u -d '30 days ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "Train/test cutoff: $CUTOFF"
+          python backtest_leader_copy.py --positions data/binance_research/positions.jsonl --candles data/binance_research/candles --out data/binance_research/backtest_report.json --train-cutoff "$CUTOFF" --capital 150
+      - name: Upload raw data and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binance-intel-research-snapshot
+          path: binance-copy-intelligence/research_v1/data/binance_research/
+          if-no-files-found: warn
+          retention-days: 14
