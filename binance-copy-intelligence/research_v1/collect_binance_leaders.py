@@ -141,10 +141,12 @@ def main() -> int:
 
     position_rows: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    collected_history_count = 0
     for index, leader in enumerate(selected, start=1):
         pid = leader["portfolioId"]
         try:
             rows = fetch_position_history(pid, args.history_pages, 50, args.delay)
+            collected_history_count += len(rows)
             fetched_at = datetime.now(timezone.utc).isoformat()
             for row in rows:
                 position_rows.append({
