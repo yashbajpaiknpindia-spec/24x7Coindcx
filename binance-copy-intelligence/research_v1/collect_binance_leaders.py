@@ -170,7 +170,7 @@ def main() -> int:
         "metrics": list(METRICS),
         "uniqueLeadersFound": len(portfolios),
         "leadersSelected": len(selected),
-        "historyRowsCollectedThisRun": sum(1 for _ in (out / "positions.jsonl").open(encoding="utf-8")) if (out / "positions.jsonl").exists() else 0,
+        "historyRowsCollectedThisRun": collected_history_count,
         "openPositions": {
             "status": "NOT_COLLECTED",
             "reason": "No stable, verified public per-leader open-position endpoint is included. Empty closed-history data must never be interpreted as no open positions.",
