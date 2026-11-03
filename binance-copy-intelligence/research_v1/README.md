@@ -43,7 +43,7 @@ Choose the train/test boundary **before** looking at test results:
 python backtest_leader_copy.py --train-cutoff 2026-08-01T00:00:00Z --capital 150
 ```
 
-The default replay is paper-only: 0.25% risk per trade, 1% stop, max 1x notional, two concurrent positions, 0.75% daily loss pause and 2.5% closed-equity drawdown kill threshold. Fees are assumed 0.05% per side, slippage 0.02% per side and funding 0.01% per 8 hours. Replace assumptions with the actual fee tier and historical funding series before considering a strategy valid.
+The default replay is paper-only: 0.25% risk per trade, 1% stop, max 1x notional, two concurrent positions, one position per symbol, 0.75% daily loss pause and 2.5% closed-equity drawdown kill threshold. Daily loss and drawdown are based on realised equity only in v1; this limitation is explicitly reported and must be upgraded to mark-to-market portfolio risk before any live use. Fees are assumed 0.05% per side, slippage 0.02% per side and funding 0.01% per 8 hours. Replace assumptions with the actual fee tier and historical funding series before considering a strategy valid.
 
 ## Promotion gates
 
