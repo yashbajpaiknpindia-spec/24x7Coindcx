@@ -1,0 +1,27 @@
+name: Binance Intel research v1 checks
+
+on:
+  pull_request:
+    paths:
+      - "binance-copy-intelligence/research_v1/**"
+      - ".github/workflows/binance-research-v1.yml"
+  push:
+    branches:
+      - "binance-intel/trader-pattern-research-v1"
+    paths:
+      - "binance-copy-intelligence/research_v1/**"
+      - ".github/workflows/binance-research-v1.yml"
+
+jobs:
+  research-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile research scripts
+        run: python -m py_compile binance-copy-intelligence/research_v1/*.py
+      - name: Run deterministic unit tests
+        working-directory: binance-copy-intelligence/research_v1
+        run: python -m unittest -v
